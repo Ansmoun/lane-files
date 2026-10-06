@@ -15,6 +15,12 @@ local keys     = require("tab.keys")
 local Divider  = require("tab.divider")
 local Sidebar  = require("tab.sidebar")
 local bookmarks = require("tab.bookmarks")
+local clipboard = require("tab.clipboard")
+local ops       = require("tab.ops")
+local dialog    = require("tab.dialog")
+local context   = require("tab.context")
+local dialog_info = require("tab.dialog_info")
+local properties  = require("tab.properties")
 
 local M = {}
 
@@ -35,6 +41,7 @@ function M.new(srv, theme, opts)
     local refresh
     local navigate_to
     local go_up
+    local _right_click_handler = nil
 
     -- ── Scroll a la selección ─────────────────────────────────
     local function scroll_to_selected()
@@ -83,6 +90,12 @@ function M.new(srv, theme, opts)
                and item.path and item.name then
                 state.selected_idx = idx or 1
                 open_selected()
+            end
+        end,
+        on_right_click = function(item, idx)
+            -- Se llena más abajo, después de definir open_menu_for.
+            if _right_click_handler then
+                _right_click_handler(item, idx)
             end
         end,
     }
@@ -207,6 +220,251 @@ function M.new(srv, theme, opts)
         redraw()
     end
 
+    -- ── Portapapeles y operaciones ────────────────────────────
+    -- Las operaciones actúan sobre la selección actual. Cuando hay
+    -- selección múltiple, se ampliará aquí. Por ahora solo una.
+    local function selected_paths()
+        local e = state:selected()
+        if not e then return {} end
+        return { e.path }
+    end
+
+    local function refresh_keep_selection()
+        local prev_sel = state:selected()
+        refresh()
+        -- Intentar mantener la selección por path
+        if prev_sel then
+            for i, e in ipairs(state.entries) do
+                if e.path == prev_sel.path then
+                    state.selected_idx = i
+                    scroll_to_selected()
+                    redraw()
+                    return
+                end
+            end
+        end
+    end
+
+    local function do_copy()
+        local paths = selected_paths()
+        if #paths == 0 then return end
+        clipboard.set("copy", paths)
+        log.info("files", "copiado: %d elementos", #paths)
+    end
+
+    local function do_cut()
+        local paths = selected_paths()
+        if #paths == 0 then return end
+        clipboard.set("cut", paths)
+        log.info("files", "cortado: %d elementos", #paths)
+    end
+
+    local function do_paste()
+        local mode, paths = clipboard.get()
+        if not mode or #paths == 0 then return end
+        local dst = state.cwd
+
+        local result, errors
+        if mode == "copy" then
+            result, errors = ops.copy(paths, dst)
+        else
+            result, errors = ops.move(paths, dst)
+            clipboard.clear()
+        end
+
+        if #errors > 0 then
+            log.warn("files", "pegar: %d errores", #errors)
+            for _, e in ipairs(errors) do
+                log.warn("files", "  %s", e)
+            end
+        end
+        if #result > 0 then
+            log.info("files", "pegado: %d elementos", #result)
+        end
+        refresh_keep_selection()
+    end
+
+    local function do_rename()
+        local e = state:selected()
+        if not e then return end
+        dialog.show {
+            parent_win = list.window,
+            srv        = srv,
+            theme      = theme,
+            title      = "Renombrar",
+            initial    = e.name,
+            accept_label = "Renombrar",
+            on_accept  = function(new_name)
+                local ok, err = ops.rename(e.path, new_name)
+                if not ok then
+                    log.warn("files", "rename: %s", tostring(err))
+                end
+                refresh_keep_selection()
+            end,
+        }
+    end
+
+    local function do_trash()
+        local paths = selected_paths()
+        if #paths == 0 then return end
+        local trashed, errors = ops.trash(paths)
+        if #errors > 0 then
+            for _, err in ipairs(errors) do
+                log.warn("files", "trash: %s", err)
+            end
+        end
+        if #trashed > 0 then
+            log.info("files", "papelera: %d elementos", #trashed)
+        end
+        refresh_keep_selection()
+    end
+
+    local function do_delete()
+        local paths = selected_paths()
+        if #paths == 0 then return end
+        local target = state:selected()
+        dialog.show {
+            parent_win = list.window,
+            srv        = srv,
+            theme      = theme,
+            title      = "Borrar permanentemente: " ..
+                (target and target.name or "?"),
+            initial    = "borrar",
+            accept_label = "Borrar",
+            on_accept  = function(confirm)
+                if confirm ~= "borrar" then return end
+                local deleted, errors = ops.delete(paths)
+                if #errors > 0 then
+                    for _, err in ipairs(errors) do
+                        log.warn("files", "delete: %s", err)
+                    end
+                end
+                refresh_keep_selection()
+            end,
+        }
+    end
+
+    local function do_mkdir()
+        dialog.show {
+            parent_win = list.window,
+            srv        = srv,
+            theme      = theme,
+            title      = "Crear carpeta",
+            initial    = "",
+            placeholder = "nombre de la carpeta",
+            accept_label = "Crear",
+            on_accept  = function(name)
+                if name == "" then return end
+                local ok, err = ops.mkdir(state.cwd, name)
+                if not ok then
+                    log.warn("files", "mkdir: %s", tostring(err))
+                end
+                refresh_keep_selection()
+            end,
+        }
+    end
+
+    local function do_touch()
+        dialog.show {
+            parent_win = list.window,
+            srv        = srv,
+            theme      = theme,
+            title      = "Crear archivo",
+            initial    = "",
+            placeholder = "nombre del archivo",
+            accept_label = "Crear",
+            on_accept  = function(name)
+                if name == "" then return end
+                local ok, err = ops.touch(state.cwd, name)
+                if not ok then
+                    log.warn("files", "touch: %s", tostring(err))
+                end
+                refresh_keep_selection()
+            end,
+        }
+    end
+
+    local function do_properties()
+        local e = state:selected()
+        if not e then return end
+        local rows = properties.rows(e.path)
+        dialog_info.show {
+            parent_win = list.window,
+            srv        = srv,
+            theme      = theme,
+            title      = "Propiedades: " .. e.name,
+            rows       = rows,
+        }
+    end
+
+    local function copy_path_to_clipboard(path)
+        -- El portapapeles X11 se maneja con xclip. Lo lanzamos en
+        -- segundo plano y le pasamos el path por stdin.
+        local cmd = "printf '%s' " ..
+            string.format("%q", path) ..
+            " | xclip -selection clipboard 2>/dev/null &"
+        os.execute(cmd)
+        log.info("files", "ruta copiada: %s", path)
+    end
+
+    -- ── Menú contextual ───────────────────────────────────────
+    local ContextMenu = require("lib.widgets.contextmenu")
+
+    local function show_context_for_entry(entry, mx, my)
+        local items = context.for_entry {
+            is_dir        = entry.is_dir,
+            on_open       = function() open_selected() end,
+            on_copy       = function() do_copy() end,
+            on_cut        = function() do_cut() end,
+            on_rename     = function() do_rename() end,
+            on_trash      = function() do_trash() end,
+            on_delete     = function() do_delete() end,
+            on_copy_path  = function()
+                copy_path_to_clipboard(entry.path)
+            end,
+            on_properties = function() do_properties() end,
+        }
+        local cm = ContextMenu.new(srv, list.window, theme)
+        cm:show(mx, my, items)
+    end
+
+    local function show_context_for_background(mx, my)
+        local items = context.for_background {
+            can_paste  = clipboard.has_content(),
+            on_paste   = function() do_paste() end,
+            on_mkdir   = function() do_mkdir() end,
+            on_touch   = function() do_touch() end,
+            on_refresh = function() refresh() end,
+        }
+        local cm = ContextMenu.new(srv, list.window, theme)
+        cm:show(mx, my, items)
+    end
+
+    -- Handler del click derecho. Recibe (item, idx) del ScrollView.
+    -- Las coordenadas del ratón las obtenemos con xcb.query_pointer.
+    -- El ScrollView no las pasa.
+    _right_click_handler = function(item, idx)
+        local xcb_ = require("lib.xcb")
+        local cx, cy = xcb_.query_pointer(srv.conn)
+        if not cx then return end
+        -- Convertir coordenadas globales a locales del listado.
+        -- El ContextMenu usa coordenadas globales de la ventana
+        -- padre. Como estamos en un child del list.window, hay que
+        -- calcular relativo al parent_win. Esto se complica; el
+        -- menu se ancla al cursor de todos modos.
+        local mx = cx - list.window.x
+        local my = cy - list.window.y
+
+        if item and type(item) == "table"
+           and item.path and item.name then
+            state.selected_idx = idx or state.selected_idx
+            redraw()
+            show_context_for_entry(item, mx, my)
+        else
+            show_context_for_background(mx, my)
+        end
+    end
+
     -- ── Marcadores ────────────────────────────────────────────
     -- Ctrl+B marca o desmarca el directorio actual. El sidebar se
     -- reconstruye en el momento. La fila que se añade o se quita
@@ -235,6 +493,14 @@ function M.new(srv, theme, opts)
         input           = status_view.input,
         go_up           = go_up,
         toggle_bookmark = toggle_bookmark,
+        on_copy         = do_copy,
+        on_cut          = do_cut,
+        on_paste        = do_paste,
+        on_rename       = do_rename,
+        on_trash        = do_trash,
+        on_delete       = do_delete,
+        on_mkdir        = do_mkdir,
+        on_refresh      = refresh,
     }
 
     -- ── Sidebar ───────────────────────────────────────────────

@@ -62,6 +62,19 @@ local function write_lines(lines)
     return true
 end
 
+-- Devuelve la lista de marcadores como array de { path, label }.
+function M.list()
+    local out = {}
+    for _, line in ipairs(read_lines()) do
+        local label = line.label
+        if not label or label == "" then
+            label = line.path:match("[^/]+$") or line.path
+        end
+        out[#out + 1] = { path = line.path, label = label }
+    end
+    return out
+end
+
 -- Añade un marcador si no existe. Devuelve true si lo añadió.
 function M.add(path, label)
     if not path or path == "" then return false end

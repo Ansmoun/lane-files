@@ -72,16 +72,21 @@ function M.make_draw_row(theme, state, row_height)
             cairo.fill(cr)
         end
 
-        local col_size = width - COL_SIZE_OFF
-        local col_date = width - COL_DATE_OFF
-        local col_type = width - COL_TYPE_OFF
+        -- Distribución proporcional de columnas:
+        --   Nombre      -> 55%
+        --   Tamaño      -> 15%
+        --   Modificado  -> 20%
+        --   Tipo        -> 10%
+        -- Se calcula desde el borde izquierdo. Así el espacio se
+        -- reparte de forma homogénea en cualquier ancho de ventana.
+        local col_size = math.floor(width * 0.55)
+        local col_date = math.floor(width * 0.70)
+        local col_type = math.floor(width * 0.90)
 
-        -- Icono del tema activo
-        local mime = icons.mime_for(item)
-        local s = icon_theme.resolve(mime, 22)
-        if not s and mime ~= "text-x-generic" then
-            s = icon_theme.resolve("text-x-generic", 22)
-        end
+        -- Icono del tema activo. icon_for resuelve el mime real,
+        -- busca la variante de icono que existe en el tema y
+        -- cachea el resultado. Después del primer frame, O(1).
+        local s = icons.icon_for(item, 22)
         if s then
             local ix = 4
             local iy = y + (rh - 18) / 2

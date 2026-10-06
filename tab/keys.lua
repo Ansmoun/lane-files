@@ -20,6 +20,8 @@ local M = {}
 --   on_delete  -- Shift+Delete sobre la selección
 --   on_mkdir   -- Ctrl+Shift+N en el cwd
 --   on_refresh -- F5
+--   on_edit_path -- Ctrl+L, enfocar breadcrumb para editar ruta
+--   on_focus_filter -- Ctrl+F, enfocar el filtro
 function M.make_on_key(opts)
     local state     = opts.state
     local refresh   = opts.refresh
@@ -37,6 +39,8 @@ function M.make_on_key(opts)
     local on_delete = opts.on_delete
     local on_mkdir  = opts.on_mkdir
     local on_refresh = opts.on_refresh
+    local on_edit_path = opts.on_edit_path
+    local on_focus_filter = opts.on_focus_filter
 
     local function after_move()
         if scroll_to then scroll_to() end
@@ -50,6 +54,12 @@ function M.make_on_key(opts)
         if key.name == "h" and key.mods.ctrl then
             state.show_hidden = not state.show_hidden
             refresh()
+            return true
+        end
+
+        -- Ctrl+L: enfocar el breadcrumb para editar la ruta
+        if key.name == "l" and key.mods.ctrl then
+            if on_edit_path then on_edit_path() end
             return true
         end
 
@@ -110,9 +120,9 @@ function M.make_on_key(opts)
             return true
         end
 
-        -- "/" enfoca el filtro
-        if key.text == "/" and not input.focused then
-            input:set_focused(true)
+        -- Ctrl+F: enfocar el filtro
+        if key.name == "f" and key.mods.ctrl then
+            if on_focus_filter then on_focus_filter() end
             return true
         end
 

@@ -1,0 +1,111 @@
+-- row: render de una fila del listado.
+-- Columnas: icono, nombre, tamaño, fecha, tipo.
+-- Distingue tres estados: normal, hover y seleccionado.
+
+local cairo       = require("lib.cairo")
+local pango       = require("lib.pango")
+local G           = require("lib.helpers.graphics")
+local icon_theme  = require("lib.icon_theme")
+local icons       = require("tab.icons")
+
+local M = {}
+
+local COL_NAME = 24
+local COL_SIZE_OFF = 380   -- distancia desde el borde derecho
+local COL_DATE_OFF = 260
+local COL_TYPE_OFF = 90
+
+-- opts:
+--   theme      -- tabla de tema
+--   is_selected(idx) -> bool   -- callback para saber si esta fila
+--                                 es la seleccionada
+--   row_height -- alto de cada fila (default 26)
+-- Devuelve función draw_row lista para ScrollView.
+function M.make_draw_row(theme, is_selected, row_height)
+    row_height = row_height or 26
+
+    return function(cr, item, idx, y, rh, width, hover)
+        if not item then return end
+
+        local is_sel = is_selected and is_selected(idx) or false
+
+        -- Fondo de la fila. La selección tiene prioridad sobre el
+        -- hover, y ambos sobre el fondo normal. Siempre se pinta,
+        -- incluso sin hover ni selección: si solo se pinta cuando
+        -- hay hover, la fila que deja de estar bajo el mouse
+        -- conserva el tinte anterior (stale pixels).
+        if is_sel then
+            local r, g, b = G.hex_to_rgba(theme.accent or "#8ec07c")
+            cairo.set_rgba(cr, r, g, b, 0.30)
+            cairo.rectangle(cr, 0, y, width, rh)
+            cairo.fill(cr)
+            -- Barra de acento a la izquierda
+            cairo.set_rgb(cr, r, g, b)
+            cairo.rectangle(cr, 0, y, 3, rh)
+            cairo.fill(cr)
+        elseif hover then
+            local r, g, b = G.hex_to_rgba(theme.bg_focus)
+            cairo.set_rgba(cr, r, g, b, 0.55)
+            cairo.rectangle(cr, 0, y, width, rh)
+            cairo.fill(cr)
+        else
+            local bg = theme.bg_rgb
+            cairo.set_rgb(cr, bg[1], bg[2], bg[3])
+            cairo.rectangle(cr, 0, y, width, rh)
+            cairo.fill(cr)
+        end
+
+        local col_size = width - COL_SIZE_OFF
+        local col_date = width - COL_DATE_OFF
+        local col_type = width - COL_TYPE_OFF
+
+        -- Icono del tema activo
+        local mime = icons.mime_for(item)
+        local s = icon_theme.resolve(mime, 22)
+        if not s and mime ~= "text-x-generic" then
+            s = icon_theme.resolve("text-x-generic", 22)
+        end
+        if s then
+            local ix = 4
+            local iy = y + (rh - 18) / 2
+            cairo.draw_surface(cr, s, ix, iy, 18, 18)
+        end
+
+        local fg    = theme.fg_rgb    or { 0.9, 0.9, 0.9 }
+        local muted = theme.muted_rgb or { 0.5, 0.5, 0.5 }
+        local ty = y + (rh - 12) / 2
+
+        -- Nombre (con clip al ancho disponible)
+        cairo.save(cr)
+        cairo.rectangle(cr, COL_NAME, y,
+            col_size - COL_NAME - 8, rh)
+        cairo.clip(cr)
+        pango.draw_text(cr, COL_NAME, ty, item.name,
+            "DejaVu Sans 10",
+            { r = fg[1], g = fg[2], b = fg[3] })
+        cairo.restore(cr)
+
+        -- Tamaño
+        local size_str = item.is_dir and "—" or icons.human_size(item.size)
+        pango.draw_text(cr, col_size, ty, size_str,
+            "DejaVu Sans 10",
+            { r = muted[1], g = muted[2], b = muted[3] })
+
+        -- Fecha
+        pango.draw_text(cr, col_date, ty, icons.human_date(item.mtime),
+            "DejaVu Sans 10",
+            { r = muted[1], g = muted[2], b = muted[3] })
+
+        -- Tipo
+        pango.draw_text(cr, col_type, ty, icons.type_label(item),
+            "DejaVu Sans 10",
+            { r = muted[1], g = muted[2], b = muted[3] })
+
+        -- Separador sutil entre filas
+        cairo.set_rgba(cr, muted[1], muted[2], muted[3], 0.15)
+        cairo.rectangle(cr, 0, y + rh - 1, width, 1)
+        cairo.fill(cr)
+    end
+end
+
+return M

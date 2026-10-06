@@ -23,6 +23,10 @@ function M.new(opts)
     self.selected_set = {}
     -- Ancla para Shift+click: índice del último click simple.
     self.anchor_idx   = 1
+    -- Criterio de ordenamiento. sort_by = "name" | "size" | "mtime"
+    -- | "type". sort_desc = true para descendente.
+    self.sort_by   = "name"
+    self.sort_desc = false
     return self
 end
 
@@ -95,12 +99,15 @@ function State:move_selection(delta)
     if new_idx > n then new_idx = n end
     self.selected_idx = new_idx
     self.anchor_idx = new_idx
-    -- Las flechas mueven solo el foco, no la multi-selección.
-    -- Si el conjunto tiene elementos, se mantiene intacto hasta
-    -- que el usuario haga click simple o Escape.
-    if next(self.selected_set) == nil then
-        local e = self.entries[new_idx]
+    -- Actualizar el conjunto si no hay multi-selección activa.
+    -- El criterio es: si el conjunto tiene 0 o 1 elementos, el
+    -- foco y el conjunto son lo mismo. Las flechas los mueven
+    -- juntos. Si tiene 2 o más, es una multi-selección activa
+    -- y el conjunto se respeta intacto hasta que el usuario la
+    -- deshaga con Escape o click simple.
+    if self:selection_count() <= 1 then
         self.selected_set = {}
+        local e = self.entries[new_idx]
         if e then self.selected_set[e.path] = true end
     end
 end
@@ -153,6 +160,18 @@ function State:select_range(idx)
 end
 
 -- Ctrl+A: selecciona todo lo visible.
+-- Cambia el criterio de ordenamiento. Si se pulsa la misma
+-- columna, alterna entre ascendente y descendente. Si es una
+-- columna nueva, empieza ascendente.
+function State:set_sort(column)
+    if self.sort_by == column then
+        self.sort_desc = not self.sort_desc
+    else
+        self.sort_by = column
+        self.sort_desc = false
+    end
+end
+
 function State:select_all()
     self.selected_set = {}
     for _, e in ipairs(self.entries) do

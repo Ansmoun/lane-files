@@ -21,6 +21,7 @@ local ops       = require("tab.ops")
 local dialog    = require("tab.dialog")
 local dialog_info = require("tab.dialog_info")
 local properties  = require("tab.properties")
+local icons       = require("tab.icons")
 local context   = require("tab.context")
 local filter_popup = require("tab.filter_popup")
 local IconsView    = require("tab.icons_view")
@@ -57,6 +58,8 @@ function M.new(srv, theme, opts)
     local _right_click_handler = nil
     local icons_view = nil
     local view_stack = nil
+    -- Forward: redraw la llama pero se define más abajo.
+    local update_selection_info
 
     -- Forward: el menú Ver (definido antes del bloque de layout)
     -- necesita esta función.
@@ -86,6 +89,11 @@ function M.new(srv, theme, opts)
         if list and list.window then
             list.window:damage_all()
         end
+        -- Cualquier cambio de selección pasa por redraw(). Aprovechamos
+        -- este punto único para actualizar la info de la status.
+        -- update_selection_info se define más abajo pero la closure
+        -- se evalúa en el momento de la llamada, no al definir redraw.
+        if update_selection_info then update_selection_info() end
     end
 
     open_selected = function()
@@ -206,11 +214,20 @@ function M.new(srv, theme, opts)
     -- Dos páginas: lista e iconos. El header de columnas solo
     -- existe en la página de lista. La página de iconos no lo
     -- necesita.
+    -- Header con ordenamiento. El callback on_sort actualiza el
+    -- estado del gestor y refresca la lista.
+    local header_view = header.new(theme, {
+        on_sort = function(column)
+            state:set_sort(column)
+            refresh()
+        end,
+    })
+
     local list_with_header = W.Group.new {
         orientation = "vertical",
         spacing = 0,
         children = {
-            { widget = header.new(theme),  weight = 0 },
+            { widget = header_view,        weight = 0 },
             { widget = Divider.new(theme), weight = 0 },
             { widget = W.Group.new {
                 orientation = "horizontal",
@@ -563,6 +580,7 @@ function M.new(srv, theme, opts)
         end
     end
 
+
     -- ── Marcadores ────────────────────────────────────────────
     local function toggle_bookmark()
         local cwd = state.cwd
@@ -686,16 +704,56 @@ function M.new(srv, theme, opts)
         close_menus = function() end,
     })
 
+    -- ── Info de hover para la status bar ─────────────────────
+    -- Formatea una entrada como cadena compacta para la status.
+    --   archivo:     "nombre.ext  ·  2.1 K  ·  2026-10-06 14:30  ·  lua"
+    --   carpeta:     "nombre  ·  Carpeta  ·  2026-10-06 14:30"
+    local function format_entry_info(e)
+        if not e then return "" end
+        local parts = { e.name }
+        if e.is_dir then
+            parts[#parts + 1] = "Carpeta"
+        else
+            parts[#parts + 1] = icons.human_size(e.size)
+        end
+        parts[#parts + 1] = icons.human_date(e.mtime)
+        if not e.is_dir then
+            parts[#parts + 1] = icons.type_label(e)
+        end
+        return table.concat(parts, "  ·  ")
+    end
+
+    -- Actualiza la status con la info del elemento seleccionado.
+    -- El elemento seleccionado es el que tiene el foco en el
+    -- listado (state.selected_idx). Cambiar de foco dispara este
+    -- refresco; el hover del cursor no afecta la status.
+    local _prev_sel_key = ""
+
+    update_selection_info = function()
+        local entry = state:selected()
+        local key = tostring(state.selected_idx) .. ":"
+            .. (entry and entry.path or "")
+        if key == _prev_sel_key then return end
+        _prev_sel_key = key
+        status_view:set_info(entry and format_entry_info(entry) or "")
+    end
+
     -- ── Refresh ──────────────────────────────────────────────
     refresh = function()
         local pattern = state.filter:match("^%*%*%s*(.+)$")
         local all, vis
         if pattern and pattern ~= "" then
             all = fs.list_recursive(state.cwd, pattern)
+            all = fs.sort(all, state.sort_by, state.sort_desc)
             vis = all
         else
             all = fs.list_dir(state.cwd)
+            all = fs.sort(all, state.sort_by, state.sort_desc)
             vis = fs.apply_filter(all, state.filter, state.show_hidden)
+        end
+        -- Sincronizar el header con el estado de orden.
+        if header_view then
+            header_view:set_sort(state.sort_by, state.sort_desc)
         end
 
         state:set_entries(vis)
@@ -734,7 +792,12 @@ function M.new(srv, theme, opts)
         else
             txt = string.format("%d elementos", n)
         end
-        status_view.count:set_text(txt)
+        status_view:set_count(txt)
+
+        -- Refrescar la info del elemento seleccionado. Al cambiar
+        -- de directorio el foco se resetea a la primera fila.
+        _prev_sel_key = ""
+        update_selection_info()
 
         redraw()
     end
@@ -761,6 +824,15 @@ function M.new(srv, theme, opts)
             log.info("files", "Ctrl+L: edición de ruta (pendiente)")
         end,
         on_focus_filter = do_open_filter,
+        on_move         = function(dir)
+            -- En vista de iconos, mover en la grilla.
+            if state.view_mode == "icons" then
+                return icons_view:move_selection(dir)
+            end
+            -- En vista de lista, no consumir. Que siga el camino
+            -- lineal.
+            return false
+        end,
     }
 
     -- Envolver el handler para interceptar atajos de vista antes

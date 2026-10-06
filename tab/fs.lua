@@ -60,10 +60,48 @@ function M.list_dir(path)
         end
     end
     p:close()
-    table.sort(entries, function(a, b)
+    return entries
+end
+
+-- Aplica el criterio de ordenamiento a una lista de entradas.
+-- Los directorios siempre van primero, después se aplica el
+-- criterio solicitado.
+--
+-- criterio: "name" | "size" | "mtime" | "type"
+-- desc: true para descendente
+function M.sort(entries, criterio, desc)
+    criterio = criterio or "name"
+
+    -- Extrae la clave de comparación para una entrada.
+    local function key(e)
+        if criterio == "size"  then return e.size  end
+        if criterio == "mtime" then return e.mtime end
+        if criterio == "type"  then
+            return (e.name:match("%.([^.]+)$") or ""):lower()
+        end
+        return e.name:lower()
+    end
+
+    -- Orden estricto débil. table.sort lo requiere:
+    --   - cmp(a, a) siempre false
+    --   - antisimetría
+    --   - transitividad
+    -- Un comparador mal formado lanza "invalid order function".
+    local function cmp(a, b)
+        -- Carpetas primero, siempre, sin importar el criterio ni
+        -- la dirección.
         if a.is_dir ~= b.is_dir then return a.is_dir end
+
+        local ka, kb = key(a), key(b)
+        if ka ~= kb then
+            if desc then return ka > kb end
+            return ka < kb
+        end
+        -- Desempate por nombre, siempre ascendente.
         return a.name:lower() < b.name:lower()
-    end)
+    end
+
+    table.sort(entries, cmp)
     return entries
 end
 
@@ -115,9 +153,6 @@ function M.list_recursive(root, pattern)
         end
     end
     p:close()
-    table.sort(entries, function(a, b)
-        return a.name:lower() < b.name:lower()
-    end)
     return entries
 end
 

@@ -1,14 +1,13 @@
 -- sidebar: panel lateral con lugares comunes y marcadores.
--- Cada item navega al path al hacer click. El item correspondiente
--- al cwd actual se marca como activo.
+-- Los iconos se dibujan con cairo vía place_icons (formas
+-- geométricas), sin depender del tema del sistema.
 
 local Area        = require("lib.area")
 local cairo       = require("lib.cairo")
 local pango       = require("lib.pango")
 local G           = require("lib.helpers.graphics")
-local icon_theme  = require("lib.icon_theme")
-local icons       = require("lib.icons")
 local places      = require("tab.places")
+local place_icons = require("tab.place_icons")
 
 local M = {}
 
@@ -16,8 +15,9 @@ local WIDTH     = 180
 local HEADER_H  = 26
 local ROW_H     = 28
 local PAD_X     = 12
+local ICON_SIZE = 18
 
--- Un item de la barra lateral: icono + label.
+-- ── Item ────────────────────────────────────────────────────
 local Item = setmetatable({}, { __index = Area })
 Item.__index = Item
 
@@ -30,14 +30,6 @@ function Item.new(theme, entry, on_click)
     self.is_active = false
     self.min_h, self.max_h = ROW_H, ROW_H
     self.min_w, self.max_w = WIDTH, WIDTH
-
-    -- Icono: preferir lib.icons (propios del toolkit), fallback a
-    -- icon_theme (tema del sistema).
-    self.icon_surface = icons.surface("files/" .. entry.icon, 18)
-    if not self.icon_surface then
-        self.icon_surface = icon_theme.resolve(entry.icon, 18)
-    end
-
     return self
 end
 
@@ -59,7 +51,6 @@ function Item:draw(cr)
         cairo.set_rgba(cr, r, g, b, 0.25)
         cairo.rectangle(cr, x, y, w, h)
         cairo.fill(cr)
-        -- Barra de acento a la izquierda
         cairo.set_rgb(cr, r, g, b)
         cairo.rectangle(cr, x, y, 3, h)
         cairo.fill(cr)
@@ -70,31 +61,25 @@ function Item:draw(cr)
         cairo.fill(cr)
     end
 
-    -- Icono (con color según estado)
+    -- Icono dibujado con cairo
     local icon_x = x + PAD_X
-    local icon_y = y + (h - 18) / 2
-    if self.icon_surface then
-        local col
-        if self.is_active then
-            col = { G.hex_to_rgba(T.accent or "#8ec07c") }
-        else
-            col = T.fg_rgb or { 0.9, 0.9, 0.9 }
-        end
-        cairo.draw_surface_tinted(cr, self.icon_surface,
-            icon_x, icon_y, 18, 18, col[1], col[2], col[3])
+    local icon_y = y + (h - ICON_SIZE) / 2
+    local col
+    if self.is_active then
+        col = { G.hex_to_rgba(T.accent or "#8ec07c") }
+    else
+        col = T.fg_rgb or { 0.9, 0.9, 0.9 }
     end
+    place_icons.draw(cr, icon_x, icon_y, ICON_SIZE, self.entry.icon,
+        col[1], col[2], col[3])
 
-    -- Label
-    local label_x = icon_x + 18 + 10
+    -- Label con truncado
+    local label_x = icon_x + ICON_SIZE + 10
     local avail_w = w - label_x - PAD_X
     local label = self.entry.label
 
-    -- Truncar si es muy largo
     local tw = pango.measure(label, "DejaVu Sans 10")
     if tw > avail_w then
-        -- Truncado con ellipsis. El while tiene un límite duro de
-        -- 50 iteraciones para evitar bucles si el ancho disponible
-        -- es minúsculo.
         local guard = 0
         while #label > 1 and guard < 50 do
             guard = guard + 1
@@ -125,7 +110,7 @@ function Item:on_mouse_press(mx, my, button)
     end
 end
 
--- ── Sidebar completo ─────────────────────────────────────────────
+-- ── Sidebar ─────────────────────────────────────────────────
 local Sidebar = setmetatable({}, { __index = Area })
 Sidebar.__index = Sidebar
 
@@ -133,23 +118,16 @@ function Sidebar.new(theme, on_navigate)
     local self = setmetatable(Area.new({}), Sidebar)
     self.theme = theme
     self.on_navigate = on_navigate
-
-    self.items = {}       -- Items visibles (todos son lugares)
-    self.rows = {}        -- Filas con su Y calculada en layout
-
+    self.items = {}
     self.min_w, self.max_w = WIDTH, WIDTH
     self.min_h, self.max_h = 100, 10000
-
     self:rebuild()
     return self
 end
 
--- Reconstruye la lista de items. Se llama al arrancar y cuando se
--- modifican marcadores.
 function Sidebar:rebuild()
     self.items = {}
 
-    -- Sección: Lugares
     for _, entry in ipairs(places.common_places()) do
         self.items[#self.items + 1] = {
             section = "Lugares",
@@ -157,15 +135,16 @@ function Sidebar:rebuild()
         }
     end
 
-    -- Sección: Marcadores
     for _, entry in ipairs(places.bookmarks()) do
+        -- Marcadores con icono distintivo (cinta) en lugar de
+        -- carpeta genérica.
+        entry.icon = "bookmark"
         self.items[#self.items + 1] = {
             section = "Marcadores",
             entry   = entry,
         }
     end
 
-    -- Crear los widgets Item
     local nav = self.on_navigate
     for _, row in ipairs(self.items) do
         row.widget = Item.new(self.theme, row.entry, function(entry)
@@ -175,8 +154,6 @@ function Sidebar:rebuild()
     end
 end
 
--- Variante pública que además fuerza el relayout del árbol.
--- Se llama desde fuera cuando se modifican los marcadores.
 function Sidebar:refresh()
     self:rebuild()
     self:invalidate_layout()
@@ -189,7 +166,6 @@ function Sidebar:set_window(win)
     end
 end
 
--- Marca como activo el item que corresponde al cwd.
 function Sidebar:set_active_path(path)
     for _, row in ipairs(self.items) do
         row.widget:set_active(row.entry.path == path)
@@ -197,7 +173,6 @@ function Sidebar:set_active_path(path)
 end
 
 function Sidebar:askMinMax(minw, minh, maxw, maxh)
-    -- Calcular alto: suma de todas las filas + headers de sección
     local h = 0
     local last_section = nil
     for _, row in ipairs(self.items) do
@@ -212,7 +187,6 @@ end
 
 function Sidebar:layout(x0, y0, x1, y1)
     Area.layout(self, x0, y0, x1, y1)
-    -- Asignar rect a cada Item, con headers de sección intercalados.
     local y = y0
     local last_section = nil
     for _, row in ipairs(self.items) do
@@ -230,14 +204,12 @@ end
 
 function Sidebar:draw(cr)
     local T = self.theme
-    -- Fondo del sidebar
     local bg = T.bg_card_rgb or T.bg_rgb or { 0.1, 0.1, 0.1 }
     cairo.set_rgb(cr, bg[1], bg[2], bg[3])
     cairo.rectangle(cr, self.x0, self.y0,
         self:getWidth(), self:getHeight())
     cairo.fill(cr)
 
-    -- Header de secciones
     local muted = T.muted_rgb or { 0.5, 0.5, 0.5 }
     for _, row in ipairs(self.items) do
         if row.header_y then
@@ -250,7 +222,6 @@ function Sidebar:draw(cr)
         end
     end
 
-    -- Items
     for _, row in ipairs(self.items) do
         row.widget:draw(cr)
     end

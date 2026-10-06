@@ -22,6 +22,10 @@ local M = {}
 --   on_refresh -- F5
 --   on_edit_path -- Ctrl+L, enfocar breadcrumb para editar ruta
 --   on_focus_filter -- Ctrl+F, enfocar el filtro
+--   on_move     -- function(dir) -> bool. Si devuelve true,
+--                  consumió el movimiento. Se llama antes de la
+--                  navegación lineal. Se usa para la grilla de
+--                  iconos.
 function M.make_on_key(opts)
     local state     = opts.state
     local refresh   = opts.refresh
@@ -41,6 +45,7 @@ function M.make_on_key(opts)
     local on_refresh = opts.on_refresh
     local on_edit_path = opts.on_edit_path
     local on_focus_filter = opts.on_focus_filter
+    local on_move = opts.on_move
 
     local function after_move()
         if scroll_to then scroll_to() end
@@ -135,6 +140,22 @@ function M.make_on_key(opts)
         -- Navegación con flechas. Si el input tiene foco, se lo
         -- dejamos a él (para mover el cursor de texto).
         if not input.focused then
+            -- Movimientos direccionales. Si el consumidor tiene
+            -- una función on_move específica del modo activo
+            -- (grilla de iconos, por ejemplo), se le da prioridad.
+            -- Si devuelve true, consumió el movimiento.
+            local arrow_map = {
+                Down     = "down",
+                Up       = "up",
+                Left     = "left",
+                Right    = "right",
+            }
+            local dir = arrow_map[key.name]
+            if dir and on_move and on_move(dir) then
+                after_move()
+                return true
+            end
+
             if key.name == "Down" then
                 state:move_selection(1)
                 after_move()
@@ -142,6 +163,16 @@ function M.make_on_key(opts)
             end
             if key.name == "Up" then
                 state:move_selection(-1)
+                after_move()
+                return true
+            end
+            if key.name == "Left" then
+                state:move_selection(-1)
+                after_move()
+                return true
+            end
+            if key.name == "Right" then
+                state:move_selection(1)
                 after_move()
                 return true
             end

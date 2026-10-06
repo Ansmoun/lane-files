@@ -157,6 +157,59 @@ function IconsView:_cell_rect(i)
     return x, y
 end
 
+-- Mueve la selección por la grilla. direction es "up", "down",
+-- "left" o "right". Devuelve true si la selección cambió.
+function IconsView:move_selection(direction)
+    local n = #self.items
+    if n == 0 then return false end
+    local cols = self.cols
+    if cols < 1 then cols = 1 end
+
+    local idx = self.state.selected_idx
+    if idx < 1 then idx = 1 end
+    if idx > n then idx = n end
+
+    local new_idx
+    if direction == "up" then
+        new_idx = idx - cols
+        if new_idx < 1 then new_idx = idx end
+    elseif direction == "down" then
+        new_idx = idx + cols
+        if new_idx > n then new_idx = idx end
+    elseif direction == "left" then
+        new_idx = idx - 1
+        if new_idx < 1 then new_idx = idx end
+    elseif direction == "right" then
+        new_idx = idx + 1
+        if new_idx > n then new_idx = idx end
+    else
+        return false
+    end
+
+    if new_idx == idx then return false end
+
+    self.state.selected_idx = new_idx
+    self.state.anchor_idx = new_idx
+    if self.state:selection_count() <= 1 then
+        self.state.selected_set = {}
+        local e = self.items[new_idx]
+        if e then self.state.selected_set[e.path] = true end
+    end
+
+    -- Scroll vertical si la fila queda fuera de la vista
+    local row = math.floor((new_idx - 1) / cols)
+    local cell_y = row * (self.cell_h + self.gap)
+    local view_h = self:getHeight()
+    if cell_y < self.offset then
+        self:set_offset(cell_y)
+    elseif cell_y + self.cell_h > self.offset + view_h then
+        self:set_offset(cell_y + self.cell_h - view_h)
+    end
+
+    self:damage()
+    return true
+end
+
 function IconsView:_idx_at(mx, my)
     if mx < 0 or my < 0
        or mx >= self:getWidth() or my >= self:getHeight() then

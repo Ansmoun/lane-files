@@ -1,10 +1,15 @@
--- status: barra inferior. Solo contador y atajos de teclado.
+-- status: barra inferior. Contador de elementos a la izquierda
+-- e información del elemento bajo el cursor a la derecha.
 
 local W = require("lib.widgets")
 
 local M = {}
 
--- Devuelve { widget = group, count = Text, hint = Text }
+-- Devuelve { widget, count, info, set_info, set_count }
+--   count       -- Text con el contador
+--   info        -- Text con la info del elemento hover
+--   set_info(s) -- actualiza el texto de info
+--   set_count(s)-- actualiza el texto de count
 function M.new(theme)
     local count = W.Text.new {
         text = "0 elementos",
@@ -15,8 +20,8 @@ function M.new(theme)
         b = theme.muted_rgb[3],
     }
 
-    local hint = W.Text.new {
-        text = "F2 renombrar  ·  F5 refrescar  ·  Ctrl+F filtrar  ·  Ctrl+H ocultos  ·  Ctrl+A todo  ·  Doble clic abrir",
+    local info = W.Text.new {
+        text = "",
         font = "DejaVu Sans 9",
         align = "right", valign = "center",
         r = theme.muted_rgb[1],
@@ -30,15 +35,28 @@ function M.new(theme)
         padding = 6,
         children = {
             { widget = count, weight = 0 },
-            { widget = hint,  weight = 1 },
+            { widget = info,  weight = 1 },
         },
     }
 
-    return {
+    -- Los métodos se llaman con `:` (status_view:set_count(txt)), así
+    -- que el primer argumento es self. Declararlos como métodos con
+    -- self explícito evita el error de "cannot convert table to string".
+    local obj = {
         widget = bar,
         count  = count,
-        hint   = hint,
+        info   = info,
     }
+
+    function obj:set_info(text)
+        self.info:set_text(text or "")
+    end
+
+    function obj:set_count(text)
+        self.count:set_text(text or "")
+    end
+
+    return obj
 end
 
 return M

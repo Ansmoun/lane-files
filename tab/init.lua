@@ -13,6 +13,8 @@ local header   = require("tab.header")
 local status   = require("tab.status")
 local keys     = require("tab.keys")
 local Divider  = require("tab.divider")
+local Sidebar  = require("tab.sidebar")
+local bookmarks = require("tab.bookmarks")
 
 local M = {}
 
@@ -29,6 +31,7 @@ function M.new(srv, theme, opts)
     local list
     local navbar_view
     local status_view
+    local sidebar_view
     local refresh
     local navigate_to
     local go_up
@@ -181,6 +184,10 @@ function M.new(srv, theme, opts)
         list:set_offset(0)
         navbar_view.path:set_text(state.cwd)
 
+        -- Sincronizar sidebar (marca el lugar activo si el cwd
+        -- coincide con alguno).
+        sidebar_view:set_active_path(state.cwd)
+
         -- Habilitar/deshabilitar botones según historial
         navbar_view.back:set_enabled(state:can_back())
         navbar_view.forward:set_enabled(state:can_forward())
@@ -200,30 +207,80 @@ function M.new(srv, theme, opts)
         redraw()
     end
 
+    -- ── Marcadores ────────────────────────────────────────────
+    -- Ctrl+B marca o desmarca el directorio actual. El sidebar se
+    -- reconstruye en el momento. La fila que se añade o se quita
+    -- cambia de posición en el layout, así que hay que forzar un
+    -- relayout completo del árbol tras el cambio.
+    local function toggle_bookmark()
+        local cwd = state.cwd
+        if bookmarks.exists(cwd) then
+            bookmarks.remove(cwd)
+        else
+            local label = cwd:match("[^/]+$") or cwd
+            bookmarks.add(cwd, label)
+        end
+        sidebar_view:refresh()
+        sidebar_view:set_active_path(cwd)
+        redraw()
+    end
+
     -- ── Teclado ───────────────────────────────────────────────
     local on_key = keys.make_on_key {
-        state     = state,
-        refresh   = refresh,
-        scroll_to = scroll_to_selected,
-        redraw    = redraw,
-        open      = open_selected,
-        input     = status_view.input,
-        go_up     = go_up,
+        state           = state,
+        refresh         = refresh,
+        scroll_to       = scroll_to_selected,
+        redraw          = redraw,
+        open            = open_selected,
+        input           = status_view.input,
+        go_up           = go_up,
+        toggle_bookmark = toggle_bookmark,
     }
 
+    -- ── Sidebar ───────────────────────────────────────────────
+    -- Se crea antes del layout. El callback on_navigate recibe el
+    -- path y dispara navigate_to. El sidebar no conoce el estado,
+    -- solo emite intención de navegación.
+    sidebar_view = Sidebar.new(theme, function(path)
+        navigate_to(path, true)
+    end)
+
     -- ── Layout raíz ───────────────────────────────────────────
+    -- Estructura:
+    --   navbar
+    --   divider
+    --   [ sidebar | [header, divider, list_area] ]
+    --   divider
+    --   status
+    local content_row = W.Group.new {
+        orientation = "horizontal",
+        spacing = 0,
+        padding = 0,
+        children = {
+            { widget = sidebar_view, weight = 0 },
+            { widget = Divider.new_vertical(theme), weight = 0 },
+            { widget = W.Group.new {
+                orientation = "vertical",
+                spacing = 0,
+                children = {
+                    { widget = header.new(theme),  weight = 0 },
+                    { widget = Divider.new(theme), weight = 0 },
+                    { widget = list_area,          weight = 1 },
+                },
+            }, weight = 1 },
+        },
+    }
+
     local layout = W.Group.new {
         orientation = "vertical",
         spacing = 0,
         padding = 0,
         children = {
-            { widget = navbar_view.widget,     weight = 0 },
-            { widget = Divider.new(theme),     weight = 0 },
-            { widget = header.new(theme),      weight = 0 },
-            { widget = Divider.new(theme),     weight = 0 },
-            { widget = list_area,              weight = 1 },
-            { widget = Divider.new(theme),     weight = 0 },
-            { widget = status_view.widget,     weight = 0 },
+            { widget = navbar_view.widget, weight = 0 },
+            { widget = Divider.new(theme), weight = 0 },
+            { widget = content_row,        weight = 1 },
+            { widget = Divider.new(theme), weight = 0 },
+            { widget = status_view.widget, weight = 0 },
         },
     }
 

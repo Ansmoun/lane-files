@@ -1,5 +1,5 @@
--- Divider: línea horizontal de 1 píxel.
--- Usado entre secciones de la UI (navbar, header, status bar).
+-- Divider: línea separadora horizontal o vertical de 1 píxel.
+-- Usado entre secciones de la UI.
 
 local Area  = require("lib.area")
 local cairo = require("lib.cairo")
@@ -9,20 +9,36 @@ local M = {}
 local Divider = setmetatable({}, { __index = Area })
 Divider.__index = Divider
 
+-- Horizontal: separa filas apiladas verticalmente.
 function Divider.new(theme)
     local self = setmetatable(Area.new({}), Divider)
+    self.orientation = "horizontal"
     self.color = theme.separator_rgb or { 0.2, 0.2, 0.2 }
     self.min_h, self.max_h = 1, 1
+    return self
+end
+
+-- Vertical: separa columnas apiladas horizontalmente.
+function Divider.new_vertical(theme)
+    local self = setmetatable(Area.new({}), Divider)
+    self.orientation = "vertical"
+    self.color = theme.separator_rgb or { 0.2, 0.2, 0.2 }
+    self.min_w, self.max_w = 1, 1
     return self
 end
 
 function Divider:draw(cr)
     local c = self.color
     cairo.set_rgb(cr, c[1], c[2], c[3])
-    cairo.rectangle(cr, self.x0, self.y0, self:getWidth(), 1)
+    if self.orientation == "vertical" then
+        cairo.rectangle(cr, self.x0, self.y0, 1, self:getHeight())
+    else
+        cairo.rectangle(cr, self.x0, self.y0, self:getWidth(), 1)
+    end
     cairo.fill(cr)
 end
 
 M.new = Divider.new
+M.new_vertical = Divider.new_vertical
 
 return M

@@ -11,6 +11,7 @@ local M = {}
 --   open       -- función que abre la entrada seleccionada
 --   input      -- TextInput del filtro
 --   go_up      -- función que sube un nivel
+--   toggle_bookmark -- función que marca/desmarca el cwd
 function M.make_on_key(opts)
     local state     = opts.state
     local refresh   = opts.refresh
@@ -19,6 +20,7 @@ function M.make_on_key(opts)
     local open      = opts.open
     local input     = opts.input
     local go_up     = opts.go_up
+    local toggle_bm = opts.toggle_bookmark
 
     local function after_move()
         if scroll_to then scroll_to() end
@@ -32,6 +34,12 @@ function M.make_on_key(opts)
         if key.name == "h" and key.mods.ctrl then
             state.show_hidden = not state.show_hidden
             refresh()
+            return true
+        end
+
+        -- Ctrl+B: marcar o desmarcar el directorio actual
+        if key.name == "b" and key.mods.ctrl then
+            if toggle_bm then toggle_bm() end
             return true
         end
 

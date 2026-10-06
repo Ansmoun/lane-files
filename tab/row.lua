@@ -17,24 +17,32 @@ local COL_TYPE_OFF = 90
 
 -- opts:
 --   theme      -- tabla de tema
---   is_selected(idx) -> bool   -- callback para saber si esta fila
---                                 es la seleccionada
+--   state      -- instancia de tab/state. Se consulta
+--                 state.selected_idx y state.selected_set para
+--                 decidir cómo pintar cada fila.
 --   row_height -- alto de cada fila (default 26)
 -- Devuelve función draw_row lista para ScrollView.
-function M.make_draw_row(theme, is_selected, row_height)
+function M.make_draw_row(theme, state, row_height)
     row_height = row_height or 26
 
     return function(cr, item, idx, y, rh, width, hover)
         if not item then return end
 
-        local is_sel = is_selected and is_selected(idx) or false
+        local is_focus = state and (idx == state.selected_idx)
+        local in_set   = state and state.selected_set
+                             and state.selected_set[item.path]
+                             and true or false
 
-        -- Fondo de la fila. La selección tiene prioridad sobre el
-        -- hover, y ambos sobre el fondo normal. Siempre se pinta,
-        -- incluso sin hover ni selección: si solo se pinta cuando
-        -- hay hover, la fila que deja de estar bajo el mouse
-        -- conserva el tinte anterior (stale pixels).
-        if is_sel then
+        -- Fondo de la fila. Prioridad:
+        --   1. Fila con foco -> acento fuerte + barra izquierda
+        --   2. Fila en el conjunto -> acento suave
+        --   3. Hover -> tinte de hover
+        --   4. Normal -> fondo normal
+        -- Siempre se pinta el fondo, incluso sin hover ni
+        -- selección: si solo se pinta cuando hay hover, la fila
+        -- que deja de estar bajo el mouse conserva el tinte
+        -- anterior (stale pixels).
+        if is_focus then
             local r, g, b = G.hex_to_rgba(theme.accent or "#8ec07c")
             cairo.set_rgba(cr, r, g, b, 0.30)
             cairo.rectangle(cr, 0, y, width, rh)
@@ -42,6 +50,15 @@ function M.make_draw_row(theme, is_selected, row_height)
             -- Barra de acento a la izquierda
             cairo.set_rgb(cr, r, g, b)
             cairo.rectangle(cr, 0, y, 3, rh)
+            cairo.fill(cr)
+        elseif in_set then
+            local r, g, b = G.hex_to_rgba(theme.accent or "#8ec07c")
+            cairo.set_rgba(cr, r, g, b, 0.15)
+            cairo.rectangle(cr, 0, y, width, rh)
+            cairo.fill(cr)
+            -- Barra tenue a la izquierda
+            cairo.set_rgba(cr, r, g, b, 0.55)
+            cairo.rectangle(cr, 0, y, 2, rh)
             cairo.fill(cr)
         elseif hover then
             local r, g, b = G.hex_to_rgba(theme.bg_focus)

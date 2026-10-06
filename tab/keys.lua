@@ -53,6 +53,13 @@ function M.make_on_key(opts)
             return true
         end
 
+        -- Ctrl+A: seleccionar todo lo visible
+        if key.name == "a" and key.mods.ctrl then
+            state:select_all()
+            if redraw then redraw() end
+            return true
+        end
+
         -- Ctrl+B: marcar o desmarcar el directorio actual
         if key.name == "b" and key.mods.ctrl then
             if toggle_bm then toggle_bm() end
@@ -154,14 +161,25 @@ function M.make_on_key(opts)
             end
         end
 
-        -- Escape: si el filtro tiene foco, lo saca y limpia.
-        -- Si no, deja que la ventana cierre.
+        -- Escape: prioridad de capas.
+        --   1. Input con foco -> limpiarlo.
+        --   2. Conjunto de selección no vacío -> limpiarlo.
+        --   3. Sin nada que limpiar -> dejar cerrar la ventana.
         if key.name == "Escape" then
             if input.focused then
                 input:set_text("")
                 input:set_focused(false)
                 state.filter = ""
                 refresh()
+                return true
+            end
+            if state:selection_count() > 1
+               or (state:selection_count() == 1
+                   and next(state.selected_set) ~= nil) then
+                state.selected_set = {}
+                local e = state.entries[state.selected_idx]
+                if e then state.selected_set[e.path] = true end
+                if redraw then redraw() end
                 return true
             end
             return false

@@ -86,9 +86,35 @@ function M.new(srv, theme, opts)
         on_click = function(item, idx)
             -- El Window también dispara on_click con el propio
             -- ScrollView como primer argumento. Filtrar por campos.
-            if item and type(item) == "table"
-               and item.path and item.name then
-                state.selected_idx = idx or 1
+            if not (item and type(item) == "table"
+                    and item.path and item.name) then
+                return
+            end
+
+            -- Detectar Ctrl y Shift con el estado actual del
+            -- teclado. En el ButtonRelease, el evento X11 trae el
+            -- campo state pero el ScrollView no lo propaga. Se
+            -- consulta el keymap directamente.
+            local xcb_ = require("lib.xcb")
+            local km = xcb_.query_keymap(srv.conn)
+            local ctrl, shift = false, false
+            if km then
+                -- keycode 37 = Control_L, 50 = Shift_L
+                ctrl  = xcb_.key_pressed(km, 37)
+                shift = xcb_.key_pressed(km, 50)
+            end
+
+            if ctrl then
+                state:toggle_selection(idx or state.selected_idx)
+                redraw()
+            elseif shift then
+                state:select_range(idx or state.selected_idx)
+                redraw()
+            else
+                state:select_single(idx or state.selected_idx)
+                -- En modo single-click abrimos la entrada. Si el
+                -- usuario quiere solo seleccionar sin abrir, puede
+                -- usar Ctrl+click.
                 open_selected()
             end
         end,
@@ -100,9 +126,7 @@ function M.new(srv, theme, opts)
         end,
     }
 
-    list.draw_row = row.make_draw_row(theme, function(idx)
-        return idx == state.selected_idx
-    end, ROW_H)
+    list.draw_row = row.make_draw_row(theme, state, ROW_H)
 
     list.on_wheel = function(self, direction)
         local delta = (direction == 4) and -13 or 13
@@ -193,6 +217,22 @@ function M.new(srv, theme, opts)
         end
 
         state:set_entries(vis)
+        -- Si el conjunto quedó con paths que ya no están visibles,
+        -- limpiarlos. Esto pasa al cambiar de directorio o al
+        -- filtrar. Sin esta limpieza, las operaciones seguirían
+        -- actuando sobre archivos invisibles.
+        local visible_paths = {}
+        for _, e in ipairs(vis) do visible_paths[e.path] = true end
+        for p, _ in pairs(state.selected_set) do
+            if not visible_paths[p] then
+                state.selected_set[p] = nil
+            end
+        end
+        -- Si el conjunto quedó vacío, marcar la fila con foco.
+        if next(state.selected_set) == nil and #vis > 0 then
+            local e = vis[state.selected_idx]
+            if e then state.selected_set[e.path] = true end
+        end
         list:set_items(vis)
         list:set_offset(0)
         navbar_view.path:set_text(state.cwd)
@@ -207,8 +247,11 @@ function M.new(srv, theme, opts)
 
         -- Contador
         local n = #vis
+        local sel_count = state:selection_count()
         local txt
-        if state.filter ~= "" then
+        if sel_count > 1 then
+            txt = string.format("%d seleccionados", sel_count)
+        elseif state.filter ~= "" then
             txt = string.format("%d de %d (filtro)", n, #all)
         elseif n == 1 then
             txt = "1 elemento"
@@ -224,9 +267,7 @@ function M.new(srv, theme, opts)
     -- Las operaciones actúan sobre la selección actual. Cuando hay
     -- selección múltiple, se ampliará aquí. Por ahora solo una.
     local function selected_paths()
-        local e = state:selected()
-        if not e then return {} end
-        return { e.path }
+        return state:selected_paths()
     end
 
     local function refresh_keep_selection()

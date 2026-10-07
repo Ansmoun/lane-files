@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Archivos
+GenericName=Gestor de archivos
+Comment=Navega y administra archivos y carpetas
+Exec=/opt/lane-files/run app.lua %U
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileManager;Utility;
+MimeType=inode/directory;
+Keywords=archivos;carpetas;files;folders;navegador;
+StartupNotify=true
+StartupWMClass=lane-files

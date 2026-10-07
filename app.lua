@@ -19,6 +19,22 @@ local pick_mode = nil
 local initial_path = nil
 local arg_list = arg or {}
 local i = 1
+
+-- Decodifica un file:// URI a path. Percent-decoding byte a byte
+-- para no romper UTF-8 en nombres de archivo.
+local function file_uri_to_path(uri)
+    local rest = uri:match("^file://(.*)$")
+    if not rest then return nil end
+    if rest:sub(1, 10) == "localhost/" then
+        rest = rest:sub(10)
+    elseif rest:sub(1, 1) ~= "/" then
+        return nil  -- host remoto, no soportado
+    end
+    return (rest:gsub("%%(%x%x)", function(h)
+        return string.char(tonumber(h, 16))
+    end))
+end
+
 while arg_list[i] do
     local a = arg_list[i]
     if a == "--pick-file" then
@@ -26,10 +42,16 @@ while arg_list[i] do
     elseif a == "--pick-dir" then
         pick_mode = "dir"
     elseif a == "-h" or a == "--help" then
-        print("Uso: app.lua [--pick-file|--pick-dir] [ruta]")
+        print("Uso: app.lua [--pick-file|--pick-dir] [ruta|uri]")
         os.exit(0)
+    elseif a:match("^file://") then
+        -- Argumento pasado por .desktop (%U). Si el path ya esta
+        -- resuelto, no pisar (primer argumento gana).
+        if not initial_path then
+            initial_path = file_uri_to_path(a)
+        end
     else
-        initial_path = a
+        if not initial_path then initial_path = a end
     end
     i = i + 1
 end

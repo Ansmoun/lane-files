@@ -38,4 +38,19 @@ if ./run -e 'require("lib.app"); require("tab"); print("requires OK")' 2>&1; the
 else
     echo "    FALLO" >&2; exit 1
 fi
+
+# Instalar el .desktop en el home del usuario real (el que invoco
+# sudo, no root). SUDO_USER lo determina.
+DESKTOP_DIR="$REAL_HOME/.local/share/applications"
+if [ -f "$DST/assets/lane-files.desktop" ]; then
+    mkdir -p "$DESKTOP_DIR"
+    cp "$DST/assets/lane-files.desktop" "$DESKTOP_DIR/lane-files.desktop"
+    chown "$(id -u "${SUDO_USER:-$USER}"):$(id -g "${SUDO_USER:-$USER}" 2>/dev/null || echo "$(id -g)")" \
+        "$DESKTOP_DIR/lane-files.desktop" 2>/dev/null || true
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+    fi
+    echo "==> .desktop instalado en $DESKTOP_DIR/lane-files.desktop"
+fi
+
 echo "==> Instalación completa. lane-files en $DST"

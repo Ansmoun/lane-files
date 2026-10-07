@@ -675,8 +675,10 @@ function M.new(srv, theme, opts)
         children = {
             { widget = navbar_view.menubar, weight = 0 },
             { widget = W.Text.new { text = "", min_width = 8 }, weight = 0 },
-            { widget = tabs_bar,            weight = 0 },
-            { widget = W.Text.new { text = "", min_width = 1 }, weight = 1 },
+            -- weight = 1: la barra de tabs absorbe el ancho
+            -- disponible. Si el contenido no cabe, scrollea
+            -- internamente (ver tabs_bar.lua).
+            { widget = tabs_bar,            weight = 1 },
         },
     }
 

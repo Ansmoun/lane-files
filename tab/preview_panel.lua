@@ -54,7 +54,16 @@ function PreviewPanel:set_entry(entry)
     self.current_surface = nil
 
     if path and not entry.is_dir and image_preview.is_image(path) then
-        local surf, err = image_preview.load(path)
+        -- Panel de 280px: pedimos el bucket "large" (256px). El
+        -- bucket "normal" (128px) se ve borroso al escalarlo a
+        -- ~250px. Si aun no esta cacheado lo generamos aqui mismo
+        -- (~60 ms, ocurre solo al cambiar de seleccion).
+        local bucket = "large"
+        local surf = image_preview.load(path, bucket)
+        if not surf then
+            image_preview.request(path, bucket)
+            surf = image_preview.load(path, bucket)
+        end
         if surf then
             self.current_surface = surf
         end

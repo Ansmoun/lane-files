@@ -26,9 +26,10 @@ local log    = require("lib.log")
 
 local M = {}
 
--- Bucket por defecto de lane-files. 128px es lo que usaba la
--- version anterior con ffmpeg.
-local BUCKET = "normal"
+-- Bucket por defecto. 128px es lo que usa icons_view. Los
+-- consumidores que necesiten mas resolucion (p.ej. preview_panel
+-- a 280px) pasan "large" explicito.
+local DEFAULT_BUCKET = "normal"
 
 local IMAGE_EXTS = {
     png = true, jpg = true, jpeg = true, gif = true,
@@ -48,36 +49,46 @@ function M.is_image(path)
     return IMAGE_EXTS[ext_of(path)] == true
 end
 
--- Path canonico en el cache. Solo calcula el hash, no mira disco.
-function M.thumb_path(path)
-    if not path then return nil end
-    return thumbs.cache_path(path, BUCKET)
+local function bucket_of(b)
+    return b or DEFAULT_BUCKET
 end
 
-function M.exists(path)
+local function cache_key(path, bucket)
+    return path .. ":" .. bucket
+end
+
+-- Path canonico en el cache. Solo calcula el hash, no mira disco.
+function M.thumb_path(path, bucket)
+    if not path then return nil end
+    return thumbs.cache_path(path, bucket_of(bucket))
+end
+
+function M.exists(path, bucket)
     if not path or not M.is_image(path) then return false end
-    local p = thumbs.cache_path(path, BUCKET)
+    local p = thumbs.cache_path(path, bucket_of(bucket))
     if not p then return false end
     return fs.is_file(p)
 end
 
 -- Genera el thumbnail si hace falta. SINCRONO. Pensado para
--- llamarse desde un timer que genera como maximo 1 por tick (ver
--- icons_view:_poll_thumbs). Llamarlo desde el draw congela la UI.
-function M.request(path)
+-- llamarse desde un timer con presupuesto (ver _poll_thumbs de
+-- icons_view). Llamarlo desde el draw congela la UI.
+function M.request(path, bucket)
     if not path or not M.is_image(path) then return end
-    thumbs.ensure(path, BUCKET)
+    thumbs.ensure(path, bucket_of(bucket))
 end
 
 -- Cache hit only. Si el PNG existe, lo carga; si no, nil. NO
 -- genera. Este es el camino rapido que se llama desde el draw.
-function M.load(path)
+function M.load(path, bucket)
     if not path or not M.is_image(path) then return nil end
-    local cached = _surface_cache[path]
+    bucket = bucket_of(bucket)
+    local key = cache_key(path, bucket)
+    local cached = _surface_cache[key]
     if cached ~= nil then
         return cached or nil
     end
-    local cache_path = thumbs.cache_path(path, BUCKET)
+    local cache_path = thumbs.cache_path(path, bucket)
     if not cache_path or not fs.is_file(cache_path) then
         return nil
     end
@@ -85,10 +96,10 @@ function M.load(path)
     if not surf then
         log.warn("image_preview", "cache ilegible: %s (%s)",
             cache_path, err or "?")
-        _surface_cache[path] = false
+        _surface_cache[key] = false
         return nil
     end
-    _surface_cache[path] = surf
+    _surface_cache[key] = surf
     return surf
 end
 

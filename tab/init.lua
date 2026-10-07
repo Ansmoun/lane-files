@@ -285,7 +285,9 @@ function M.new(srv, theme, opts)
         view_stack:set_active(id)
         local e = tabs.by_id[id]
         -- Sincronizar navbar (breadcrumb + botones) y sidebar con
-        -- la nueva tab.
+        -- la nueva tab. Cancelar cualquier timer pendiente del
+        -- breadcrumb de la tab anterior.
+        navbar_view.cancel_pending()
         navbar_view.breadcrumb:set_path(e.view.state.cwd)
         navbar_view.back:set_enabled(e.view.state:can_back())
         navbar_view.forward:set_enabled(e.view.state:can_forward())
@@ -341,6 +343,12 @@ function M.new(srv, theme, opts)
 
     tabs.on_tab_renamed = function() sync_tabs_bar() end
     tabs.on_active_changed = function(v)
+        -- El breadcrumb difiere la navegacion 400 ms para
+        -- desambiguar doble click. Si el usuario navega por otra
+        -- via (doble click en carpeta, Alt+Arriba, historial) en
+        -- esa ventana, el timer fantasma dispara despues y hace
+        -- rebotar la navegacion. Cancelarlo en cada cambio de cwd.
+        navbar_view.cancel_pending()
         navbar_view.breadcrumb:set_path(v.state.cwd)
         navbar_view.back:set_enabled(v.state:can_back())
         navbar_view.forward:set_enabled(v.state:can_forward())

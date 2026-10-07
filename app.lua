@@ -34,6 +34,10 @@ while arg_list[i] do
     i = i + 1
 end
 
+-- ¿Restaurar sesion? Solo si el usuario no pidio un path explicito
+-- por CLI ni estamos en modo pick. Si pasa un path, respetamos ese
+-- y no tocamos la sesion.
+local load_session = (initial_path == nil) and (pick_mode == nil)
 initial_path = initial_path or os.getenv("HOME")
 
 local title = "LANE \xe2\x80\x94 Archivos"
@@ -50,6 +54,7 @@ App.new {
     build = function(srv, T)
         return require("tab").new(srv, T, {
             initial_path = initial_path,
+            load_session = load_session,
             pick_mode    = pick_mode,
             on_pick = function(paths)
                 -- Escribir la primera ruta a stdout. El resto

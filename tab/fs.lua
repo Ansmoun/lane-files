@@ -177,6 +177,19 @@ function M.apply_filter(entries, filter, show_hidden)
     return out
 end
 
+-- ¿Existe y es directorio? Una llamada a shell por vez, solo se
+-- usa al restaurar sesion. Para validacion en caliente, preferir
+-- stat via lib.fs de LaneTK.
+function M.is_dir(path)
+    if not path or path == "" then return false end
+    local p = io.popen("test -d '" .. path:gsub("'", "'\\''") ..
+        "' && echo D 2>/dev/null")
+    if not p then return false end
+    local ok = p:read("*l") == "D"
+    p:close()
+    return ok
+end
+
 -- Abre un archivo con xdg-open en segundo plano.
 function M.open(entry)
     if not entry then return end

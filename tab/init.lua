@@ -29,6 +29,7 @@ local status     = require("tab.status")
 local Divider    = require("tab.divider")
 local icons      = require("tab.icons")
 local config     = require("tab.config")
+local session    = require("tab.session")
 
 local M = {}
 
@@ -46,7 +47,7 @@ local function new_tabs(opts)
     return self
 end
 
-function Tabs:add(initial_path)
+function Tabs:add(initial_path, snapshot)
     local id = "tab-" .. self._next_id
     self._next_id = self._next_id + 1
     local name = initial_path
@@ -55,6 +56,7 @@ function Tabs:add(initial_path)
 
     local view = TabView.new(self.srv, self.theme, {
         initial_path    = initial_path,
+        snapshot        = snapshot,
         view_mode       = self.opts.view_mode,
         icon_size       = self.opts.icon_size,
         on_cwd_change   = function(cwd) self:_on_cwd_change(id, cwd) end,
@@ -182,14 +184,39 @@ function M.new(srv, theme, opts)
     local set_window
     tabs.window = nil
 
-    -- ── Crear la primera pestaña ────────────────────────────
-    local first = tabs:add(initial_path)
-    tabs.active_id = first.id
-
     -- ── Stack de TabView ────────────────────────────────────
     view_stack = Stack.new {}
-    view_stack:add(first.id, first.view.widget)
-    view_stack.active = first.id
+
+    -- ── Restaurar sesion o crear tab inicial ────────────────
+    -- opts.load_session: solo se activa cuando el consumidor no
+    -- paso un path explicito (ver app.lua). Si la sesion apunta a
+    -- paths que ya no existen, se cae a $HOME.
+    local restored = false
+    if opts.load_session then
+        local snap = session.load()
+        if snap and snap.tabs and #snap.tabs > 0 then
+            for _, ts in ipairs(snap.tabs) do
+                local p = ts.path
+                if not p or p == "" or not require("tab.fs").is_dir(p) then
+                    p = os.getenv("HOME")
+                end
+                local entry = tabs:add(p, ts)
+                view_stack:add(entry.id, entry.view.widget)
+            end
+            local ai = tonumber(snap.active_idx) or 1
+            if ai < 1 or ai > #tabs.list then ai = 1 end
+            local active_entry = tabs.list[ai]
+            tabs.active_id = active_entry.id
+            view_stack.active = active_entry.id
+            restored = true
+        end
+    end
+    if not restored then
+        local first = tabs:add(initial_path)
+        tabs.active_id = first.id
+        view_stack:add(first.id, first.view.widget)
+        view_stack.active = first.id
+    end
 
     -- ── Callbacks de navegación que van a la tab activa ────
     local function active()
@@ -850,6 +877,21 @@ function M.new(srv, theme, opts)
         set_window = set_window,
         start     = start,
         stop      = function()
+            -- Guardar sesion solo si estamos en modo persistente
+            -- (load_session=true). Si el usuario abrio con un path
+            -- explicito, no pisamos la sesion anterior.
+            if opts.load_session then
+                local snap = { tabs = {}, active_idx = 1 }
+                for i, e in ipairs(tabs.list) do
+                    if e.view.get_snapshot then
+                        snap.tabs[#snap.tabs + 1] = e.view.get_snapshot()
+                    end
+                    if e.id == tabs.active_id then snap.active_idx = i end
+                end
+                if #snap.tabs > 0 then
+                    session.save(snap)
+                end
+            end
             for _, e in ipairs(tabs.list) do
                 if e.view.destroy then e.view:destroy() end
             end

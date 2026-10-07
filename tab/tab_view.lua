@@ -64,7 +64,20 @@ function TabView.new(srv, theme, opts)
     self.opts = opts
 
     self.state = State.new { initial_path = opts.initial_path }
-    self.state.view_mode = opts.view_mode or "list"
+
+    -- Snapshot restaurado desde session.lua, si lo hay. Precede a
+    -- opts.view_mode, pero no al initial_path (que ya lo aplico
+    -- State.new). Los valores invalidos se normalizan.
+    if opts.snapshot then
+        local sn = opts.snapshot
+        self.state.view_mode   = sn.view_mode or "list"
+        self.state.sort_by     = sn.sort_by or "name"
+        self.state.sort_desc   = sn.sort_desc == true
+        self.state.show_hidden = sn.show_hidden == true
+        self.state.filter      = sn.filter or ""
+    else
+        self.state.view_mode = opts.view_mode or "list"
+    end
     if self.state.view_mode ~= "list"
        and self.state.view_mode ~= "icons" then
         self.state.view_mode = "list"
@@ -820,6 +833,19 @@ function TabView.new(srv, theme, opts)
         if icons_view and icons_view.destroy then
             icons_view:destroy()
         end
+    end
+
+    -- Devuelve un snapshot serializable del estado de esta tab.
+    -- Lo consume session.save al cerrar limpio.
+    self.get_snapshot = function()
+        return {
+            path        = self.state.cwd,
+            view_mode   = self.state.view_mode,
+            sort_by     = self.state.sort_by,
+            sort_desc   = self.state.sort_desc,
+            show_hidden = self.state.show_hidden,
+            filter      = self.state.filter,
+        }
     end
 
     -- Start inicial

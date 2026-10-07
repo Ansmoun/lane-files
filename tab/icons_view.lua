@@ -168,6 +168,10 @@ function IconsView:set_window(win)
     -- si algún thumbnail pasó de "no listo" a "listo" y daña solo
     -- esas celdas.
     if win and win.server and not self._poll_timer then
+        -- add_timer (periodico) es lo correcto: queremos poll
+        -- continuo mientras haya thumbs por generar. Se cancela
+        -- en destroy() cuando la tab se cierra. NO migrar a
+        -- add_timeout, que solo dispararia una vez.
         self._poll_timer = win.server:add_timer(100, function()
             self:_poll_thumbs()
         end)

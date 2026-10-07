@@ -303,23 +303,18 @@ function Breadcrumb:on_mouse_press(mx, my, button)
             if self._click_timer then
                 self._click_timer:cancel()
             end
-            -- add_timer es periodico: sin auto-cancel, el handle
-            -- sigue disparando cada DOUBLE_CLICK_MS aunque ya
-            -- hayamos navegado. Poner self._click_timer = nil no
-            -- alcanza: el handle queda vivo en srv.timers y llama
-            -- nav(path) para siempre, rebotando la navegacion.
-            local h
-            h = self.srv:add_timer(DOUBLE_CLICK_MS,
+            -- add_timeout es one-shot: se auto-cancela antes de
+            -- invocar el callback, asi que no queda un handle vivo
+            -- disparando cada DOUBLE_CLICK_MS. Cancelamos por
+            -- adelantado cuando el usuario navega por otra via
+            -- (ver cancel_pending) para no rebotar la navegacion.
+            self._click_timer = self.srv:add_timeout(DOUBLE_CLICK_MS,
                 function()
-                    h:cancel()
-                    if self._click_timer == h then
-                        self._click_timer = nil
-                    end
+                    self._click_timer = nil
                     self._last_click.time = 0
                     self._last_click.idx = 0
                     nav(path)
                 end)
-            self._click_timer = h
         elseif nav then
             nav(path)
         end

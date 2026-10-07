@@ -324,6 +324,12 @@ function IconsView:set_hover(v)
 end
 
 function IconsView:on_mouse_press(mx, my, button)
+    if self.window and self.window.server
+       and self.window.server.is_input_blocked
+       and self.window.server:is_input_blocked() then
+        return
+    end
+
     local idx = self:_idx_at(mx, my)
     if idx < 0 then
         if button == 3 and self.on_right_click then

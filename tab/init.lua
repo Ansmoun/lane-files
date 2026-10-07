@@ -1,679 +1,512 @@
--- tab: composición del gestor de archivos.
--- Ata state, fs, row, navbar, header, status, sidebar, keys,
--- context y las operaciones en un widget raíz.
+-- tab: contenedor del gestor de archivos con pestañas.
+--
+-- Estructura:
+--   ┌──────────────────────────────────────┐
+--   │ TabsBar  [tab1][tab2][+]             │
+--   ├──────────────────────────────────────┤
+--   │ Menubar  Archivo Editar Ver ...      │
+--   │ Nav      [<][>][^][🏠] breadcrumb... │
+--   ├──────────────────────────────────────┤
+--   │ Sidebar  │  Stack de TabView (activa)│
+--   ├──────────────────────────────────────┤
+--   │ Status   elementos  ·  seleccionado  │
+--   └──────────────────────────────────────┘
+--
+-- Una TabView encapsula el estado (cwd, selección, historial) y
+-- las dos vistas intercambiables (lista e iconos). El navbar,
+-- sidebar y status son compartidos: se actualizan cuando cambia
+-- el cwd o la selección de la pestaña activa.
 
 local W        = require("lib.widgets")
 local log      = require("lib.log")
-local timer    = require("lib.timer")
+local Stack    = require("lib.widgets.stack")
 
-local State    = require("tab.state")
-local fs       = require("tab.fs")
-local row      = require("tab.row")
-local navbar   = require("tab.navbar")
-local header   = require("tab.header")
-local status   = require("tab.status")
-local keys     = require("tab.keys")
-local Divider  = require("tab.divider")
-local Sidebar  = require("tab.sidebar")
-local bookmarks = require("tab.bookmarks")
-local clipboard = require("tab.clipboard")
-local ops       = require("tab.ops")
-local dialog    = require("tab.dialog")
-local dialog_info = require("tab.dialog_info")
-local properties  = require("tab.properties")
-local icons       = require("tab.icons")
-local context   = require("tab.context")
-local filter_popup = require("tab.filter_popup")
-local IconsView    = require("tab.icons_view")
-local config       = require("tab.config")
+local TabView    = require("tab.tab_view")
+local TabsBar    = require("tab.tabs_bar")
+local navbar     = require("tab.navbar")
+local Sidebar    = require("tab.sidebar")
+local status     = require("tab.status")
+local Divider    = require("tab.divider")
+local icons      = require("tab.icons")
+local config     = require("tab.config")
 
 local M = {}
 
-local ROW_H = 26
-local DOUBLE_CLICK_MS = 400
+-- ── Gestor de pestañas ─────────────────────────────────────
+local Tabs = {}
+Tabs.__index = Tabs
 
+local function new_tabs(opts)
+    local self = setmetatable({}, Tabs)
+    self.list = {}       -- array de { id, view }
+    self.by_id = {}
+    self.active_id = nil
+    self._next_id = 1
+    self.opts = opts or {}
+    return self
+end
+
+function Tabs:add(initial_path)
+    local id = "tab-" .. self._next_id
+    self._next_id = self._next_id + 1
+    local name = initial_path
+        and (initial_path:match("[^/]+$") or initial_path)
+        or "Inicio"
+
+    local view = TabView.new(self.srv, self.theme, {
+        initial_path    = initial_path,
+        view_mode       = self.opts.view_mode,
+        icon_size       = self.opts.icon_size,
+        on_cwd_change   = function(cwd) self:_on_cwd_change(id, cwd) end,
+        on_selection_change = function(st)
+            self:_on_selection_change(id, st)
+        end,
+        on_view_mode_change = function(mode)
+            config.set("view_mode", mode)
+        end,
+        on_icon_size_change = function(sz)
+            config.set("icons_size", sz)
+        end,
+        on_bookmarks_change = function()
+            self:_on_bookmarks_change()
+        end,
+        get_parent_window = function() return self.window end,
+    })
+    view.tab_id = id
+    view.tab_name = name
+
+    local entry = { id = id, view = view, name = name }
+    self.list[#self.list + 1] = entry
+    self.by_id[id] = entry
+    return entry
+end
+
+function Tabs:remove(id)
+    local idx
+    for i, e in ipairs(self.list) do
+        if e.id == id then idx = i; break end
+    end
+    if not idx then return end
+    table.remove(self.list, idx)
+    self.by_id[id] = nil
+end
+
+function Tabs:count() return #self.list end
+
+function Tabs:get(id)
+    return self.by_id[id]
+end
+
+function Tabs:active()
+    local e = self.active_id and self.by_id[self.active_id]
+    return e and e.view or nil
+end
+
+function Tabs:set_active(id, callbacks)
+    if not self.by_id[id] then return end
+    self.active_id = id
+    -- Notificar a la UI compartida
+    local entry = self.by_id[id]
+    if callbacks and callbacks.on_activate then
+        callbacks.on_activate(entry.view)
+    end
+end
+
+-- Renombra una pestaña a partir del cwd actual.
+function Tabs:_on_cwd_change(id, cwd)
+    local e = self.by_id[id]
+    if not e then return end
+    local name = cwd:match("[^/]+$") or "/"
+    if name == "" then name = "/" end
+    if e.name ~= name then
+        e.name = name
+        e.view.tab_name = name
+        if self.on_tab_renamed then
+            self.on_tab_renamed()
+        end
+    end
+    -- Si es la tab activa, refrescar navbar y sidebar.
+    if id == self.active_id and self.on_active_changed then
+        self.on_active_changed(e.view)
+    end
+end
+
+function Tabs:_on_selection_change(id, st)
+    if id == self.active_id and self.on_active_selection then
+        self.on_active_selection(st)
+    end
+end
+
+function Tabs:_on_bookmarks_change()
+    if self.on_bookmarks_changed then
+        self.on_bookmarks_changed()
+    end
+end
+
+-- ── Constructor público ────────────────────────────────────
 function M.new(srv, theme, opts)
     opts = opts or {}
-    local state = State.new { initial_path = opts.initial_path }
-    -- Modo de vista persistido entre sesiones. Default "list".
-    state.view_mode = config.get("view_mode", "list")
-    if state.view_mode ~= "list" and state.view_mode ~= "icons" then
-        state.view_mode = "list"
+    local self = {}
+
+    -- Estado persistido
+    local saved_view = config.get("view_mode", "list")
+    if saved_view ~= "list" and saved_view ~= "icons" then
+        saved_view = "list"
     end
-
-    -- ── Forward declarations ─────────────────────────────────
-    local list
-    local navbar_view
-    local status_view
-    local sidebar_view
-    local refresh
-    local navigate_to
-    local go_up
-    local go_back
-    local go_forward
-    local go_home
-    local open_selected
-    local redraw
-    local scroll_to_selected
-    local _right_click_handler = nil
-    local icons_view = nil
-    local view_stack = nil
-    -- Forward: redraw la llama pero se define más abajo.
-    local update_selection_info
-
-    -- Forward: el menú Ver (definido antes del bloque de layout)
-    -- necesita esta función.
-    local set_view
-
-    -- Estado del doble click
-    local _last_click = { time = 0, idx = 0 }
-
-    -- ── Helpers básicos ──────────────────────────────────────
-    scroll_to_selected = function()
-        if not list or not list.window then return end
-        local off = list:get_offset()
-        local vh  = list:getHeight()
-        if vh <= 0 then return end
-        local first   = math.floor(off / ROW_H)
-        local visible = math.max(1, math.floor(vh / ROW_H))
-        local last    = first + visible - 1
-        local sel0    = state.selected_idx - 1
-        if sel0 < first then
-            list:set_offset(sel0 * ROW_H)
-        elseif sel0 > last then
-            list:set_offset((sel0 - visible + 1) * ROW_H)
-        end
-    end
-
-    redraw = function()
-        if list and list.window then
-            list.window:damage_all()
-        end
-        -- Cualquier cambio de selección pasa por redraw(). Aprovechamos
-        -- este punto único para actualizar la info de la status.
-        -- update_selection_info se define más abajo pero la closure
-        -- se evalúa en el momento de la llamada, no al definir redraw.
-        if update_selection_info then update_selection_info() end
-    end
-
-    open_selected = function()
-        local entry = state:selected()
-        if not entry then return end
-        if entry.is_dir then
-            navigate_to(entry.path, true)
-        else
-            fs.open(entry)
-        end
-    end
-
-    -- ── Listado (ScrollView) ─────────────────────────────────
-    list = W.ScrollView.new {
-        row_height = ROW_H,
-        bg_color = nil,
-        min_width = 600,
-        min_height = ROW_H * 14,
-        on_click = function(item, idx)
-            if not (item and type(item) == "table"
-                    and item.path and item.name) then
-                return
-            end
-            idx = idx or state.selected_idx
-
-            -- Detectar modificadores
-            local xcb_ = require("lib.xcb")
-            local km = xcb_.query_keymap(srv.conn)
-            local ctrl, shift = false, false
-            if km then
-                ctrl  = xcb_.key_pressed(km, 37)  -- Control_L
-                shift = xcb_.key_pressed(km, 50)  -- Shift_L
-            end
-
-            if ctrl then
-                state:toggle_selection(idx)
-                redraw()
-                _last_click.time = 0
-                return
-            end
-            if shift then
-                state:select_range(idx)
-                redraw()
-                _last_click.time = 0
-                return
-            end
-
-            -- Detección de doble click: mismo índice, dentro de la
-            -- ventana temporal.
-            local now = timer.now_ms()
-            local is_double = (_last_click.idx == idx)
-                and (now - _last_click.time) < DOUBLE_CLICK_MS
-
-            state:select_single(idx)
-            if is_double then
-                _last_click.time = 0
-                _last_click.idx = 0
-                open_selected()
-            else
-                _last_click.time = now
-                _last_click.idx = idx
-                redraw()
-            end
-        end,
-        on_right_click = function(item, idx, mx, my)
-            if _right_click_handler then
-                _right_click_handler(item, idx, mx, my)
-            end
-        end,
-    }
-
-    list.draw_row = row.make_draw_row(theme, state, ROW_H)
-
-    list.on_wheel = function(self, direction)
-        local delta = (direction == 4) and -13 or 13
-        self:set_offset(self:get_offset() + delta)
-    end
-
-    local slider = W.ScrollBar.new {
-        orientation = "vertical",
-        width = 12, thickness = 3, handle_r = 4,
-        step = 30,
-        color_handle = theme.accent,
-        color_track = theme.separator,
-    }
-    W.ScrollLink.link(list, slider)
-
-    -- Vista de iconos. Se pasa la referencia al Server para que
-    -- pueda consultar el estado del teclado (Ctrl+rueda para zoom).
-    icons_view = IconsView.new(theme, state)
-    icons_view.srv = srv
-
-    -- Cargar el tamaño de icono persistido (si existe) y conectar
-    -- el callback que lo guarda cada vez que el usuario lo cambia
-    -- con Ctrl+rueda.
     local saved_size = config.get("icons_size", nil)
-    if type(saved_size) == "number" then
-        icons_view:set_icon_size(saved_size)
+    if type(saved_size) ~= "number" then saved_size = nil end
+
+    local initial_path = opts.initial_path or os.getenv("HOME")
+
+    local tabs = new_tabs({
+        view_mode = saved_view,
+        icon_size = saved_size,
+    })
+    tabs.srv = srv
+    tabs.theme = theme
+
+    -- Referencias a la UI compartida
+    local tabs_bar
+    local navbar_view
+    local sidebar_view
+    local status_view
+    local view_stack
+
+    -- La Window se asigna cuando el contenedor se monta. Los
+    -- callbacks get_parent_window la usan.
+    local _window
+    -- Forward: el layout raíz la intercepta más abajo.
+    local set_window
+    tabs.window = nil
+
+    -- ── Crear la primera pestaña ────────────────────────────
+    local first = tabs:add(initial_path)
+    tabs.active_id = first.id
+
+    -- ── Stack de TabView ────────────────────────────────────
+    view_stack = Stack.new {}
+    view_stack:add(first.id, first.view.widget)
+    view_stack.active = first.id
+
+    -- ── Callbacks de navegación que van a la tab activa ────
+    local function active()
+        return tabs:active()
     end
-    icons_view.on_icon_size_change = function(sz)
-        config.set("icons_size", sz)
+
+    local function go_back()
+        local v = active(); if v then v.go_back() end
+    end
+    local function go_forward()
+        local v = active(); if v then v.go_forward() end
+    end
+    local function go_up()
+        local v = active(); if v then v.go_up() end
+    end
+    local function go_home()
+        local v = active(); if v then v.go_home() end
+    end
+    local function do_copy()
+        local v = active(); if v then v.do_copy() end
+    end
+    local function do_cut()
+        local v = active(); if v then v.do_cut() end
+    end
+    local function do_paste()
+        local v = active(); if v then v.do_paste() end
+    end
+    local function do_rename()
+        local v = active(); if v then v.do_rename() end
+    end
+    local function do_trash()
+        local v = active(); if v then v.do_trash() end
+    end
+    local function do_delete()
+        local v = active(); if v then v.do_delete() end
+    end
+    local function do_mkdir()
+        local v = active(); if v then v.do_mkdir() end
+    end
+    local function do_touch()
+        local v = active(); if v then v.do_touch() end
+    end
+    local function do_properties()
+        local v = active(); if v then v.do_properties() end
+    end
+    local function do_open_with()
+        local v = active(); if v then v.do_open_with() end
+    end
+    local function do_terminal()
+        local v = active(); if v then v.do_terminal() end
+    end
+    local function do_open_filter()
+        local v = active(); if v then v.do_open_filter() end
+    end
+    local function do_open_trash()
+        local v = active(); if v then v.do_open_trash() end
+    end
+    local function do_empty_trash()
+        local v = active(); if v then v.do_empty_trash() end
+    end
+    local function do_restore_from_trash()
+        local v = active(); if v then v.do_restore_from_trash() end
+    end
+    local function toggle_bookmark()
+        local v = active(); if v then v.toggle_bookmark() end
+    end
+    local function refresh()
+        local v = active(); if v then v.refresh() end
     end
 
-    -- Los callbacks de la vista de iconos son los mismos que los de
-    -- la lista. Se reasignan más abajo, después de definir todos los
-    -- handlers. Por ahora quedan nil.
+    local function redraw_all()
+        if _window then _window:damage_all() end
+    end
 
-    -- ScrollBar para la vista de iconos (barra independiente).
-    local icons_slider = W.ScrollBar.new {
-        orientation = "vertical",
-        width = 12, thickness = 3, handle_r = 4,
-        step = 60,
-        color_handle = theme.accent,
-        color_track = theme.separator,
-    }
-    W.ScrollLink.link(icons_view, icons_slider)
+    -- ── Barra de pestañas ───────────────────────────────────
+    local function sync_tabs_bar()
+        local list = {}
+        for _, e in ipairs(tabs.list) do
+            list[#list + 1] = { id = e.id, name = e.name }
+        end
+        tabs_bar:set_tabs(list, tabs.active_id)
+        -- set_tabs ya invoca invalidate_layout internamente. El
+        -- layout raíz se re-ejecuta en el próximo ciclo del event
+        -- loop y los botones reciben su rect.
+    end
 
-    -- Dos páginas: lista e iconos. El header de columnas solo
-    -- existe en la página de lista. La página de iconos no lo
-    -- necesita.
-    -- Header con ordenamiento. El callback on_sort actualiza el
-    -- estado del gestor y refresca la lista.
-    local header_view = header.new(theme, {
-        on_sort = function(column)
-            state:set_sort(column)
-            refresh()
-        end,
+    local function switch_to(id)
+        if not tabs.by_id[id] then return end
+        tabs.active_id = id
+        view_stack:set_active(id)
+        local e = tabs.by_id[id]
+        -- Sincronizar navbar (breadcrumb + botones) y sidebar con
+        -- la nueva tab.
+        navbar_view.breadcrumb:set_path(e.view.state.cwd)
+        navbar_view.back:set_enabled(e.view.state:can_back())
+        navbar_view.forward:set_enabled(e.view.state:can_forward())
+        sidebar_view:set_active_path(e.view.state.cwd)
+        tabs_bar.active_id = id
+        sync_tabs_bar()
+        if e.view.update_selection_info then
+            e.view.update_selection_info()
+        end
+        redraw_all()
+    end
+
+    local function close_tab(id)
+        if tabs:count() <= 1 then
+            -- Última pestaña: cerrar la ventana.
+            if _window then _window:close("última pestaña cerrada") end
+            return
+        end
+        tabs:remove(id)
+        view_stack:remove(id)
+        if tabs.active_id == id then
+            -- Activar la primera disponible
+            local next_id = tabs.list[1] and tabs.list[1].id
+            if next_id then switch_to(next_id) end
+        else
+            sync_tabs_bar()
+        end
+    end
+
+    local function new_tab(path)
+        local entry = tabs:add(path or (active() and active().state.cwd)
+            or os.getenv("HOME"))
+        view_stack:add(entry.id, entry.view.widget)
+        switch_to(entry.id)
+    end
+
+    tabs.on_tab_renamed = function() sync_tabs_bar() end
+    tabs.on_active_changed = function(v)
+        navbar_view.breadcrumb:set_path(v.state.cwd)
+        navbar_view.back:set_enabled(v.state:can_back())
+        navbar_view.forward:set_enabled(v.state:can_forward())
+        sidebar_view:set_active_path(v.state.cwd)
+    end
+    tabs.on_active_selection = function(st)
+        -- Actualizar status con la info del seleccionado.
+        local entry = st:selected()
+        if entry then
+            local parts = { entry.name }
+            if entry.is_dir then
+                parts[#parts + 1] = "Carpeta"
+            else
+                parts[#parts + 1] = icons.human_size(entry.size)
+            end
+            parts[#parts + 1] = icons.human_date(entry.mtime)
+            if not entry.is_dir then
+                parts[#parts + 1] = icons.type_label(entry)
+            end
+            status_view:set_info(table.concat(parts, "  ·  "))
+        else
+            status_view:set_info("")
+        end
+    end
+    tabs.on_bookmarks_changed = function()
+        sidebar_view:refresh()
+    end
+
+    tabs_bar = TabsBar.new(theme, {
+        on_select = switch_to,
+        on_close  = close_tab,
+        on_new    = new_tab,
     })
 
-    local list_with_header = W.Group.new {
-        orientation = "vertical",
-        spacing = 0,
-        children = {
-            { widget = header_view,        weight = 0 },
-            { widget = Divider.new(theme), weight = 0 },
-            { widget = W.Group.new {
-                orientation = "horizontal",
-                spacing = 0,
-                children = {
-                    { widget = list,   weight = 1 },
-                    { widget = slider, weight = 0 },
-                },
-            }, weight = 1 },
-        },
-    }
+    -- ── Sidebar ─────────────────────────────────────────────
+    sidebar_view = Sidebar.new(theme,
+        function(path)
+            local v = active()
+            if v then v.navigate_to(path, true) end
+        end,
+        function(entry, mx, my)
+            -- Click derecho en el sidebar.
+            local items = {
+                { label = "Ir a " .. entry.label,
+                  on_click = function()
+                      local v = active()
+                      if v then v.navigate_to(entry.path, true) end
+                  end },
+                { label = "Abrir en nueva pestaña",
+                  on_click = function() new_tab(entry.path) end },
+            }
+            if entry.icon == "user-trash" then
+                items[#items + 1] = { sep = true }
+                items[#items + 1] = {
+                    label = "Vaciar papelera",
+                    color = { 0.9, 0.3, 0.3 },
+                    on_click = function() do_empty_trash() end,
+                }
+            end
+            local ContextMenu_local = require("lib.widgets.contextmenu")
+            local cm = ContextMenu_local.new(srv, _window, theme)
+            cm:show(mx, my, items)
+        end)
 
-    local page_list = list_with_header
-
-    local page_icons = W.Group.new {
-        orientation = "horizontal",
-        spacing = 0,
-        children = {
-            { widget = icons_view,   weight = 1 },
-            { widget = icons_slider, weight = 0 },
-        },
-    }
-
-    local Stack = require("lib.widgets.stack")
-    view_stack = Stack.new {}
-    view_stack:add("list", page_list)
-    view_stack:add("icons", page_icons)
-    view_stack.active = state.view_mode
-
-    -- Implementación de set_view. Persiste el modo en config.
-    set_view = function(mode)
-        if state.view_mode == mode then return end
-        state.view_mode = mode
-        view_stack.active = mode
-        view_stack:invalidate_layout()
-        config.set("view_mode", mode)
-        redraw()
-    end
-
-    local list_area = view_stack
-
-    -- ── Status ───────────────────────────────────────────────
+    -- ── Status ──────────────────────────────────────────────
     status_view = status.new(theme)
 
-    -- ── Navegación ───────────────────────────────────────────
-    navigate_to = function(path, push_history)
-        -- Cancelar cualquier timer pendiente del breadcrumb ANTES
-        -- del early return. Si el usuario navega a la misma ruta
-        -- que ya está activa, el timer del breadcrumb podría
-        -- seguir armado y disparar después, sacándolo de donde
-        -- está.
-        if navbar_view and navbar_view.cancel_pending then
-            navbar_view.cancel_pending()
-        end
-        if path == state.cwd then return end
-        state:set_cwd(path, push_history)
-        refresh()
-    end
-
-    go_up = function()
-        navigate_to(fs.parent(state.cwd), true)
-    end
-
-    go_back = function()
-        if state:go_back() then refresh() end
-    end
-
-    go_forward = function()
-        if state:go_forward() then refresh() end
-    end
-
-    go_home = function()
-        navigate_to(os.getenv("HOME") or "/", true)
-    end
-
-    -- ── Operaciones sobre archivos ───────────────────────────
-    local function selected_paths()
-        return state:selected_paths()
-    end
-
-    local function refresh_keep_selection()
-        local prev_sel = state:selected()
-        refresh()
-        if prev_sel then
-            for i, e in ipairs(state.entries) do
-                if e.path == prev_sel.path then
-                    state.selected_idx = i
-                    scroll_to_selected()
-                    redraw()
-                    return
-                end
-            end
-        end
-    end
-
-    local function do_copy()
-        local paths = selected_paths()
-        if #paths == 0 then return end
-        clipboard.set("copy", paths)
-        log.info("files", "copiado: %d elementos", #paths)
-    end
-
-    local function do_cut()
-        local paths = selected_paths()
-        if #paths == 0 then return end
-        clipboard.set("cut", paths)
-        log.info("files", "cortado: %d elementos", #paths)
-    end
-
-    local function do_paste()
-        local mode, paths = clipboard.get()
-        if not mode or #paths == 0 then return end
-        local dst = state.cwd
-        local result, errors
-        if mode == "copy" then
-            result, errors = ops.copy(paths, dst)
-        else
-            result, errors = ops.move(paths, dst)
-            clipboard.clear()
-        end
-        if #errors > 0 then
-            for _, e in ipairs(errors) do
-                log.warn("files", "pegar: %s", e)
-            end
-        end
-        if #result > 0 then
-            log.info("files", "pegado: %d elementos", #result)
-        end
-        refresh_keep_selection()
-    end
-
-    local function do_rename()
-        local e = state:selected()
-        if not e then return end
-        dialog.show {
-            parent_win = list.window, srv = srv, theme = theme,
-            title = "Renombrar",
-            initial = e.name,
-            accept_label = "Renombrar",
-            on_accept = function(new_name)
-                local ok, err = ops.rename(e.path, new_name)
-                if not ok then
-                    log.warn("files", "rename: %s", tostring(err))
-                end
-                refresh_keep_selection()
-            end,
-        }
-    end
-
-    local function do_trash()
-        local paths = selected_paths()
-        if #paths == 0 then return end
-        local trashed, errors = ops.trash(paths)
-        if #errors > 0 then
-            for _, err in ipairs(errors) do
-                log.warn("files", "trash: %s", err)
-            end
-        end
-        if #trashed > 0 then
-            log.info("files", "papelera: %d elementos", #trashed)
-        end
-        refresh_keep_selection()
-    end
-
-    local function do_delete()
-        local paths = selected_paths()
-        if #paths == 0 then return end
-        local target = state:selected()
-        dialog.show {
-            parent_win = list.window, srv = srv, theme = theme,
-            title = "Borrar permanentemente: " ..
-                (target and target.name or "?"),
-            initial = "borrar",
-            accept_label = "Borrar",
-            on_accept = function(confirm)
-                if confirm ~= "borrar" then return end
-                local deleted, errors = ops.delete(paths)
-                if #errors > 0 then
-                    for _, err in ipairs(errors) do
-                        log.warn("files", "delete: %s", err)
-                    end
-                end
-                refresh_keep_selection()
-            end,
-        }
-    end
-
-    local function do_mkdir()
-        dialog.show {
-            parent_win = list.window, srv = srv, theme = theme,
-            title = "Crear carpeta",
-            initial = "",
-            placeholder = "nombre de la carpeta",
-            accept_label = "Crear",
-            on_accept = function(name)
-                if name == "" then return end
-                local ok, err = ops.mkdir(state.cwd, name)
-                if not ok then
-                    log.warn("files", "mkdir: %s", tostring(err))
-                end
-                refresh_keep_selection()
-            end,
-        }
-    end
-
-    local function do_touch()
-        dialog.show {
-            parent_win = list.window, srv = srv, theme = theme,
-            title = "Crear archivo",
-            initial = "",
-            placeholder = "nombre del archivo",
-            accept_label = "Crear",
-            on_accept = function(name)
-                if name == "" then return end
-                local ok, err = ops.touch(state.cwd, name)
-                if not ok then
-                    log.warn("files", "touch: %s", tostring(err))
-                end
-                refresh_keep_selection()
-            end,
-        }
-    end
-
-    local function do_properties()
-        local e = state:selected()
-        if not e then return end
-        local rows = properties.rows(e.path)
-        dialog_info.show {
-            parent_win = list.window, srv = srv, theme = theme,
-            title = "Propiedades: " .. e.name,
-            rows = rows,
-        }
-    end
-
-    local function copy_path_to_clipboard(path)
-        os.execute("printf '%s' " .. string.format("%q", path) ..
-            " | xclip -selection clipboard 2>/dev/null &")
-        log.info("files", "ruta copiada: %s", path)
-    end
-
-    local function do_open_filter()
-        filter_popup.show {
-            parent_win = list.window, srv = srv, theme = theme,
-            initial = state.filter,
-            on_change = function(text)
-                state.filter = text or ""
-                refresh()
-            end,
-        }
-    end
-
-    -- ── Menú contextual ──────────────────────────────────────
-    local ContextMenu = require("lib.widgets.contextmenu")
-
-    local function show_context_for_entry(entry, mx, my)
-        local items = context.for_entry {
-            is_dir        = entry.is_dir,
-            on_open       = function() open_selected() end,
-            on_copy       = function() do_copy() end,
-            on_cut        = function() do_cut() end,
-            on_rename     = function() do_rename() end,
-            on_trash      = function() do_trash() end,
-            on_delete     = function() do_delete() end,
-            on_copy_path  = function()
-                copy_path_to_clipboard(entry.path)
-            end,
-            on_properties = function() do_properties() end,
-        }
-        local cm = ContextMenu.new(srv, list.window, theme)
-        cm:show(mx, my, items)
-    end
-
-    local function show_context_for_background(mx, my)
-        local items = context.for_background {
-            can_paste  = clipboard.has_content(),
-            on_paste   = function() do_paste() end,
-            on_mkdir   = function() do_mkdir() end,
-            on_touch   = function() do_touch() end,
-            on_refresh = function() refresh() end,
-        }
-        local cm = ContextMenu.new(srv, list.window, theme)
-        cm:show(mx, my, items)
-    end
-
-    _right_click_handler = function(item, idx, mx, my)
-        if not mx or not my then return end
-        -- Las coordenadas llegan locales a la vista activa. Hay que
-        -- sumar la posición de la vista dentro de la ventana.
-        local active_widget = (state.view_mode == "icons")
-            and icons_view or list
-        local wx = active_widget.x0 + mx
-        local wy = active_widget.y0 + my
-        if item and type(item) == "table"
-           and item.path and item.name then
-            state.selected_idx = idx or state.selected_idx
-            redraw()
-            show_context_for_entry(item, wx, wy)
-        else
-            show_context_for_background(wx, wy)
-        end
-    end
-
-    -- Conectar los callbacks de la vista de iconos.
-    icons_view.on_click = list.opts and list.opts.on_click or function() end
-    -- No podemos reusar la closure del list directamente porque
-    -- está definida inline. Duplicamos la lógica de click aquí.
-    icons_view.on_click = function(item, idx)
-        if not (item and type(item) == "table"
-                and item.path and item.name) then
-            return
-        end
-        idx = idx or state.selected_idx
-        local xcb_ = require("lib.xcb")
-        local km = xcb_.query_keymap(srv.conn)
-        local ctrl, shift = false, false
-        if km then
-            ctrl  = xcb_.key_pressed(km, 37)
-            shift = xcb_.key_pressed(km, 50)
-        end
-        if ctrl then
-            state:toggle_selection(idx)
-            redraw()
-            _last_click.time = 0
-            return
-        end
-        if shift then
-            state:select_range(idx)
-            redraw()
-            _last_click.time = 0
-            return
-        end
-        local now = timer.now_ms()
-        local is_double = (_last_click.idx == idx)
-            and (now - _last_click.time) < DOUBLE_CLICK_MS
-        state:select_single(idx)
-        if is_double then
-            _last_click.time = 0
-            _last_click.idx = 0
-            open_selected()
-        else
-            _last_click.time = now
-            _last_click.idx = idx
-            redraw()
-        end
-    end
-
-    icons_view.on_right_click = function(item, idx, mx, my)
-        if _right_click_handler then
-            _right_click_handler(item, idx, mx, my)
-        end
-    end
-
-
-    -- ── Marcadores ────────────────────────────────────────────
-    local function toggle_bookmark()
-        local cwd = state.cwd
-        if bookmarks.exists(cwd) then
-            bookmarks.remove(cwd)
-        else
-            local label = cwd:match("[^/]+$") or cwd
-            bookmarks.add(cwd, label)
-        end
-        sidebar_view:refresh()
-        sidebar_view:set_active_path(cwd)
-        redraw()
-    end
-
-    -- ── Sidebar ───────────────────────────────────────────────
-    sidebar_view = Sidebar.new(theme, function(path)
-        navigate_to(path, true)
-    end)
-
-    -- ── Menú superior ────────────────────────────────────────
+    -- ── Menús ───────────────────────────────────────────────
     local function menu_open_context(anchor, items, on_close)
-        -- Anclar el ContextMenu debajo del item del menubar.
-        local cm = ContextMenu.new(srv, list.window, theme)
+        local ContextMenu_local = require("lib.widgets.contextmenu")
+        local cm = ContextMenu_local.new(srv, _window, theme)
+        -- Rect del ancla en coordenadas de la ventana padre. Si el
+        -- usuario hace click sobre el mismo botón que abrió el
+        -- menú, el click se consume aquí y solo cierra.
+        local ar = nil
+        if anchor and anchor.x0 and anchor.x1 then
+            ar = {
+                x = anchor.x0,
+                y = anchor.y0,
+                w = anchor.x1 - anchor.x0,
+                h = anchor.y1 - anchor.y0,
+            }
+        end
         cm:show(anchor.x0, anchor.y1 + 2, items, {
-            on_close = function()
-                if on_close then on_close() end
-            end,
+            on_close = function() if on_close then on_close() end end,
+            anchor_rect = ar,
         })
+    end
+
+    local function set_view(mode)
+        local v = active()
+        if v then v.set_view(mode) end
+    end
+
+    local function is_in_trash()
+        local v = active()
+        return v and v.is_in_trash() or false
     end
 
     local menus = {
         { label = "Archivo", build = function() return {
+            { label = "Nueva pestaña",
+              on_click = function() new_tab() end },
+            { sep = true },
             { label = "Nueva carpeta", on_click = do_mkdir },
             { label = "Nuevo archivo", on_click = do_touch },
             { sep = true },
-            { label = "Cerrar ventana", on_click = function()
-                if list.window then list.window:close("menu") end
-            end },
-        } end },
-        { label = "Editar", build = function() return {
-            { label = "Cortar", on_click = do_cut,
-              enabled = #state:selected_paths() > 0 },
-            { label = "Copiar", on_click = do_copy,
-              enabled = #state:selected_paths() > 0 },
-            { label = "Pegar", on_click = do_paste,
-              enabled = clipboard.has_content() },
-            { sep = true },
-            { label = "Renombrar", on_click = do_rename,
-              enabled = state:selected() ~= nil },
-            { label = "Eliminar", on_click = do_trash,
-              enabled = #state:selected_paths() > 0 },
-            { sep = true },
-            { label = "Seleccionar todo", on_click = function()
-                state:select_all(); redraw()
-            end },
-            { label = "Filtrar...", on_click = do_open_filter },
-        } end },
-        { label = "Ver", build = function() return {
-            { label = "Vista de lista",
-              on_click = function() set_view("list") end,
-              enabled = state.view_mode ~= "list" },
-            { label = "Vista de iconos",
-              on_click = function() set_view("icons") end,
-              enabled = state.view_mode ~= "icons" },
-            { sep = true },
-            { label = (state.show_hidden and "Ocultar ocultos"
-                      or "Mostrar ocultos"),
+            { label = "Cerrar pestaña",
               on_click = function()
-                  state.show_hidden = not state.show_hidden
-                  refresh()
+                  if tabs.active_id then close_tab(tabs.active_id) end
               end },
-            { sep = true },
-            { label = "Refrescar", on_click = refresh },
+            { label = "Cerrar ventana",
+              on_click = function()
+                  if _window then _window:close("menu") end
+              end },
         } end },
-        { label = "Ir", build = function() return {
-            { label = "Atrás", on_click = go_back,
-              enabled = state:can_back() },
-            { label = "Adelante", on_click = go_forward,
-              enabled = state:can_forward() },
-            { label = "Arriba", on_click = go_up },
-            { label = "Inicio", on_click = go_home },
-            { sep = true },
-            { label = "Editar ruta...", on_click = function()
-                log.info("files", "Ctrl+L: edición de ruta (pendiente)")
-            end },
-        } end },
+        { label = "Editar", build = function()
+            local v = active()
+            local sel_n = v and v.state:selection_count() or 0
+            local paths = v and v.state:selected_paths() or {}
+            return {
+                { label = "Cortar", on_click = do_cut,
+                  enabled = #paths > 0 },
+                { label = "Copiar", on_click = do_copy,
+                  enabled = #paths > 0 },
+                { label = "Pegar", on_click = do_paste,
+                  enabled = require("tab.clipboard").has_content() },
+                { sep = true },
+                { label = "Renombrar", on_click = do_rename,
+                  enabled = v and v.state:selected() ~= nil },
+                { label = "Eliminar", on_click = do_trash,
+                  enabled = #paths > 0 },
+                { sep = true },
+                { label = "Seleccionar todo", on_click = function()
+                    if v then v.state:select_all(); v.redraw() end
+                end },
+                { label = "Filtrar...", on_click = do_open_filter },
+            }
+        end },
+        { label = "Ver", build = function()
+            local v = active()
+            local mode = v and v.state.view_mode or "list"
+            return {
+                { label = "Vista de lista",
+                  on_click = function() set_view("list") end,
+                  enabled = mode ~= "list" },
+                { label = "Vista de iconos",
+                  on_click = function() set_view("icons") end,
+                  enabled = mode ~= "icons" },
+                { sep = true },
+                { label = (v and v.state.show_hidden
+                          and "Ocultar ocultos" or "Mostrar ocultos"),
+                  on_click = function()
+                      if v then
+                          v.state.show_hidden = not v.state.show_hidden
+                          v.refresh()
+                      end
+                  end },
+                { sep = true },
+                { label = "Refrescar", on_click = refresh },
+            }
+        end },
+        { label = "Ir", build = function()
+            local v = active()
+            local cb = v and v.state:can_back() or false
+            local cf = v and v.state:can_forward() or false
+            return {
+                { label = "Atrás", on_click = go_back, enabled = cb },
+                { label = "Adelante", on_click = go_forward, enabled = cf },
+                { label = "Arriba", on_click = go_up },
+                { label = "Inicio", on_click = go_home },
+                { sep = true },
+                { label = "Papelera", on_click = do_open_trash },
+                { sep = true },
+                { label = "Nueva pestaña aquí",
+                  on_click = function()
+                      new_tab(v and v.state.cwd or nil)
+                  end },
+            }
+        end },
         { label = "Marcadores", build = function()
+            local bookmarks = require("tab.bookmarks")
             local items = {}
             for _, b in ipairs(bookmarks.list()) do
                 items[#items + 1] = {
                     label = b.label,
                     on_click = function()
-                        navigate_to(b.path, true)
+                        local v = active()
+                        if v then v.navigate_to(b.path, true) end
                     end,
                 }
             end
@@ -684,12 +517,32 @@ function M.new(srv, theme, opts)
             }
             return items
         end },
-        { label = "Herramientas", build = function() return {
-            { label = "Propiedades", on_click = do_properties,
-              enabled = state:selected() ~= nil },
-        } end },
+        { label = "Herramientas", build = function()
+            local v = active()
+            local items = {
+                { label = "Abrir terminal aquí",
+                  on_click = do_terminal },
+                { label = "Propiedades",
+                  on_click = do_properties,
+                  enabled = v and v.state:selected() ~= nil },
+            }
+            if is_in_trash() then
+                items[#items + 1] = { sep = true }
+                items[#items + 1] = {
+                    label = "Restaurar seleccionado",
+                    on_click = do_restore_from_trash,
+                    enabled = v and v.state:selected() ~= nil,
+                }
+                items[#items + 1] = {
+                    label = "Vaciar papelera",
+                    on_click = do_empty_trash,
+                }
+            end
+            return items
+        end },
     }
 
+    -- ── Navbar ──────────────────────────────────────────────
     navbar_view = navbar.new(theme, {
         srv     = srv,
         back    = go_back,
@@ -697,155 +550,34 @@ function M.new(srv, theme, opts)
         up      = go_up,
         home    = go_home,
         on_navigate = function(path)
-            navigate_to(path, true)
+            local v = active()
+            if v then v.navigate_to(path, true) end
         end,
         menus = menus,
         open_menu = menu_open_context,
         close_menus = function() end,
+        -- Modo compacto: un solo botón hamburguesa en lugar de la
+        -- fila completa de menús. Libera ~400px de ancho.
+        compact_menubar = true,
     })
 
-    -- ── Info de hover para la status bar ─────────────────────
-    -- Formatea una entrada como cadena compacta para la status.
-    --   archivo:     "nombre.ext  ·  2.1 K  ·  2026-10-06 14:30  ·  lua"
-    --   carpeta:     "nombre  ·  Carpeta  ·  2026-10-06 14:30"
-    local function format_entry_info(e)
-        if not e then return "" end
-        local parts = { e.name }
-        if e.is_dir then
-            parts[#parts + 1] = "Carpeta"
-        else
-            parts[#parts + 1] = icons.human_size(e.size)
-        end
-        parts[#parts + 1] = icons.human_date(e.mtime)
-        if not e.is_dir then
-            parts[#parts + 1] = icons.type_label(e)
-        end
-        return table.concat(parts, "  ·  ")
-    end
-
-    -- Actualiza la status con la info del elemento seleccionado.
-    -- El elemento seleccionado es el que tiene el foco en el
-    -- listado (state.selected_idx). Cambiar de foco dispara este
-    -- refresco; el hover del cursor no afecta la status.
-    local _prev_sel_key = ""
-
-    update_selection_info = function()
-        local entry = state:selected()
-        local key = tostring(state.selected_idx) .. ":"
-            .. (entry and entry.path or "")
-        if key == _prev_sel_key then return end
-        _prev_sel_key = key
-        status_view:set_info(entry and format_entry_info(entry) or "")
-    end
-
-    -- ── Refresh ──────────────────────────────────────────────
-    refresh = function()
-        local pattern = state.filter:match("^%*%*%s*(.+)$")
-        local all, vis
-        if pattern and pattern ~= "" then
-            all = fs.list_recursive(state.cwd, pattern)
-            all = fs.sort(all, state.sort_by, state.sort_desc)
-            vis = all
-        else
-            all = fs.list_dir(state.cwd)
-            all = fs.sort(all, state.sort_by, state.sort_desc)
-            vis = fs.apply_filter(all, state.filter, state.show_hidden)
-        end
-        -- Sincronizar el header con el estado de orden.
-        if header_view then
-            header_view:set_sort(state.sort_by, state.sort_desc)
-        end
-
-        state:set_entries(vis)
-
-        -- Limpiar del conjunto los paths que ya no son visibles
-        local visible_paths = {}
-        for _, e in ipairs(vis) do visible_paths[e.path] = true end
-        for p, _ in pairs(state.selected_set) do
-            if not visible_paths[p] then
-                state.selected_set[p] = nil
-            end
-        end
-        if next(state.selected_set) == nil and #vis > 0 then
-            local e = vis[state.selected_idx]
-            if e then state.selected_set[e.path] = true end
-        end
-
-        list:set_items(vis)
-        list:set_offset(0)
-        icons_view:set_items(vis)
-        icons_view:set_offset(0)
-        navbar_view.breadcrumb:set_path(state.cwd)
-        sidebar_view:set_active_path(state.cwd)
-        navbar_view.back:set_enabled(state:can_back())
-        navbar_view.forward:set_enabled(state:can_forward())
-
-        local n = #vis
-        local sel_count = state:selection_count()
-        local txt
-        if sel_count > 1 then
-            txt = string.format("%d seleccionados", sel_count)
-        elseif state.filter ~= "" then
-            txt = string.format("%d de %d (filtro)", n, #all)
-        elseif n == 1 then
-            txt = "1 elemento"
-        else
-            txt = string.format("%d elementos", n)
-        end
-        status_view:set_count(txt)
-
-        -- Refrescar la info del elemento seleccionado. Al cambiar
-        -- de directorio el foco se resetea a la primera fila.
-        _prev_sel_key = ""
-        update_selection_info()
-
-        redraw()
-    end
-
-    -- ── Teclado ──────────────────────────────────────────────
-    local keys_handler = keys.make_on_key {
-        state           = state,
-        refresh         = refresh,
-        scroll_to       = scroll_to_selected,
-        redraw          = redraw,
-        open            = open_selected,
-        input           = { focused = false },  -- el filtro ya no está en el navbar
-        go_up           = go_up,
-        toggle_bookmark = toggle_bookmark,
-        on_copy         = do_copy,
-        on_cut          = do_cut,
-        on_paste        = do_paste,
-        on_rename       = do_rename,
-        on_trash        = do_trash,
-        on_delete       = do_delete,
-        on_mkdir        = do_mkdir,
-        on_refresh      = refresh,
-        on_edit_path    = function()
-            log.info("files", "Ctrl+L: edición de ruta (pendiente)")
-        end,
-        on_focus_filter = do_open_filter,
-        on_move         = function(dir)
-            -- En vista de iconos, mover en la grilla.
-            if state.view_mode == "icons" then
-                return icons_view:move_selection(dir)
-            end
-            -- En vista de lista, no consumir. Que siga el camino
-            -- lineal.
-            return false
-        end,
+    -- ── Layout ──────────────────────────────────────────────
+    -- Fila superior: hamburguesa, espacio, pestañas, spacer
+    -- absorbente. La hamburguesa es un cuadro compacto de 34px.
+    -- Después un pequeño hueco (8px) y a continuación las
+    -- pestañas alineadas a la izquierda.
+    local tab_menu_row = W.Group.new {
+        orientation = "horizontal",
+        spacing = 0,
+        padding = 0,
+        children = {
+            { widget = navbar_view.menubar, weight = 0 },
+            { widget = W.Text.new { text = "", min_width = 8 }, weight = 0 },
+            { widget = tabs_bar,            weight = 0 },
+            { widget = W.Text.new { text = "", min_width = 1 }, weight = 1 },
+        },
     }
 
-    -- Envolver el handler para interceptar atajos de vista antes
-    -- de pasarlos al manejador general.
-    local on_key = function(key)
-        if key.pressed and key.mods.ctrl then
-            if key.name == "1" then set_view("list");  return true end
-            if key.name == "2" then set_view("icons"); return true end
-        end
-        return keys_handler(key)
-    end
-
-    -- ── Layout raíz ──────────────────────────────────────────
     local content_row = W.Group.new {
         orientation = "horizontal",
         spacing = 0,
@@ -853,7 +585,7 @@ function M.new(srv, theme, opts)
         children = {
             { widget = sidebar_view, weight = 0 },
             { widget = Divider.new_vertical(theme), weight = 0 },
-            { widget = list_area,    weight = 1 },
+            { widget = view_stack,   weight = 1 },
         },
     }
 
@@ -862,6 +594,8 @@ function M.new(srv, theme, opts)
         spacing = 0,
         padding = 0,
         children = {
+            { widget = tab_menu_row,       weight = 0 },
+            { widget = Divider.new(theme), weight = 0 },
             { widget = navbar_view.widget, weight = 0 },
             { widget = Divider.new(theme), weight = 0 },
             { widget = content_row,        weight = 1 },
@@ -870,17 +604,98 @@ function M.new(srv, theme, opts)
         },
     }
 
+    -- Interceptar set_window del layout raíz. Window:set_root
+    -- llama a area:set_window(win) sobre el widget raíz (este
+    -- Group). La metatabla de Group propaga el window a los
+    -- hijos, pero nuestra función set_window (que actualiza tabs,
+    -- sidebar y demás) nunca se llama. Sin esta intercepción,
+    -- _window queda nil y los menús que lo usan crashean.
+    local _orig_group_set_window = layout.set_window
+    layout.set_window = function(self2, win)
+        if _orig_group_set_window then
+            _orig_group_set_window(self2, win)
+        else
+            self2.window = win
+            for _, c in ipairs(self2.children or {}) do
+                if c.set_window then c:set_window(win)
+                else c.window = win end
+            end
+        end
+        set_window(win)
+    end
+
+    -- ── Ciclo de vida ───────────────────────────────────────
+    set_window = function(win)
+        _window = win
+        tabs.window = win
+        tabs_bar.window = win
+        sidebar_view:set_window(win)
+        if navbar_view.menubar then
+            navbar_view.menubar.window = win
+        end
+        if navbar_view.breadcrumb then
+            navbar_view.breadcrumb.window = win
+        end
+        for _, e in ipairs(tabs.list) do
+            if e.view.list then e.view.list.window = win end
+            if e.view.icons_view then
+                e.view.icons_view.window = win
+            end
+        end
+        -- Sincronizar breadcrumb y sidebar con la tab activa
+        local e = tabs.by_id[tabs.active_id]
+        if e then
+            navbar_view.breadcrumb:set_path(e.view.state.cwd)
+            sidebar_view:set_active_path(e.view.state.cwd)
+        end
+    end
+
     local function start()
-        state.history = { state.cwd }
-        state.history_idx = 1
-        refresh()
+        sync_tabs_bar()
+        local e = tabs.by_id[tabs.active_id]
+        if e then
+            navbar_view.breadcrumb:set_path(e.view.state.cwd)
+            sidebar_view:set_active_path(e.view.state.cwd)
+        end
+    end
+
+    local function on_key(key)
+        -- Atajos globales del contenedor (no de la tab).
+        if key.pressed and key.mods.ctrl then
+            if key.name == "t" and not key.mods.shift then
+                new_tab()
+                return true
+            end
+            if key.name == "w" then
+                if tabs.active_id then close_tab(tabs.active_id) end
+                return true
+            end
+            if key.name == "Tab" then
+                -- Ctrl+Tab: siguiente pestaña.
+                if tabs:count() <= 1 then return true end
+                local idx
+                for i, e in ipairs(tabs.list) do
+                    if e.id == tabs.active_id then idx = i; break end
+                end
+                local nxt = (idx % tabs:count()) + 1
+                switch_to(tabs.list[nxt].id)
+                return true
+            end
+        end
+        -- Delegar a la tab activa.
+        local v = active()
+        if v and v.on_key then
+            return v.on_key(key)
+        end
+        return false
     end
 
     return {
-        widget = layout,
-        start  = start,
-        stop   = function() end,
-        on_key = on_key,
+        widget    = layout,
+        set_window = set_window,
+        start     = start,
+        stop      = function() end,
+        on_key    = on_key,
     }
 end
 

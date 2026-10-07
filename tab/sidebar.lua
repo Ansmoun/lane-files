@@ -21,11 +21,12 @@ local ICON_SIZE = 18
 local Item = setmetatable({}, { __index = Area })
 Item.__index = Item
 
-function Item.new(theme, entry, on_click)
+function Item.new(theme, entry, on_click, on_right_click)
     local self = setmetatable(Area.new({}), Item)
     self._hover_visual = true
     self.entry = entry
     self.on_click = on_click
+    self.on_right_click = on_right_click
     self.theme = theme
     self.is_active = false
     self.min_h, self.max_h = ROW_H, ROW_H
@@ -105,8 +106,20 @@ function Item:draw(cr)
 end
 
 function Item:on_mouse_press(mx, my, button)
+    if self.window and self.window.server
+       and self.window.server.is_input_blocked
+       and self.window.server:is_input_blocked() then
+        return
+    end
+
     if button == 1 and self.on_click then
         self.on_click(self.entry)
+    elseif button == 3 and self.on_right_click then
+        -- Pasar mx, my en coordenadas globales de la ventana.
+        -- El consumidor usa esto para anclar el ContextMenu.
+        local gx = self.x0 + mx
+        local gy = self.y0 + my
+        self.on_right_click(self.entry, gx, gy)
     end
 end
 
@@ -114,10 +127,11 @@ end
 local Sidebar = setmetatable({}, { __index = Area })
 Sidebar.__index = Sidebar
 
-function Sidebar.new(theme, on_navigate)
+function Sidebar.new(theme, on_navigate, on_item_context)
     local self = setmetatable(Area.new({}), Sidebar)
     self.theme = theme
     self.on_navigate = on_navigate
+    self.on_item_context = on_item_context
     self.items = {}
     self.min_w, self.max_w = WIDTH, WIDTH
     self.min_h, self.max_h = 100, 10000
@@ -146,10 +160,15 @@ function Sidebar:rebuild()
     end
 
     local nav = self.on_navigate
+    local ctx = self.on_item_context
     for _, row in ipairs(self.items) do
-        row.widget = Item.new(self.theme, row.entry, function(entry)
-            if nav then nav(entry.path) end
-        end)
+        row.widget = Item.new(self.theme, row.entry,
+            function(entry)
+                if nav then nav(entry.path) end
+            end,
+            function(entry, mx, my)
+                if ctx then ctx(entry, mx, my) end
+            end)
         row.widget.window = self.window
     end
 end
@@ -241,8 +260,8 @@ end
 M.Item    = Item
 M.Sidebar = Sidebar
 
-M.new = function(theme, on_navigate)
-    return Sidebar.new(theme, on_navigate)
+M.new = function(theme, on_navigate, on_item_context)
+    return Sidebar.new(theme, on_navigate, on_item_context)
 end
 
 return M

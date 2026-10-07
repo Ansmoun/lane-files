@@ -93,7 +93,8 @@ function M.new(theme, handlers)
     local menubar = Menubar.new(theme,
         handlers.menus or {},
         handlers.open_menu,
-        handlers.close_menus)
+        handlers.close_menus,
+        { compact = handlers.compact_menubar })
 
     -- Modo edición del breadcrumb: input alternativo en el Stack.
     local path_input
@@ -152,18 +153,9 @@ function M.new(theme, handlers)
     path_stack:add("edit", path_input)
     path_stack.active = "path"
 
-    -- Fila 1: menubar
-    local menu_row = W.Group.new {
-        orientation = "horizontal",
-        spacing = 0,
-        padding = 0,
-        children = {
-            { widget = menubar, weight = 0 },
-            { widget = W.Text.new { text = "", min_width = 1 }, weight = 1 },
-        },
-    }
-
-    -- Fila 2: nav buttons + stack (breadcrumb o input)
+    -- nav_bar ahora solo contiene la fila de navegación.
+    -- El menubar se expone por separado para que el contenedor
+    -- pueda colocarlo en la misma fila que la barra de pestañas.
     local nav_row = W.Group.new {
         orientation = "horizontal",
         spacing = 4,
@@ -178,15 +170,7 @@ function M.new(theme, handlers)
         },
     }
 
-    local nav_bar = W.Group.new {
-        orientation = "vertical",
-        spacing = 0,
-        padding = 0,
-        children = {
-            { widget = menu_row, weight = 0 },
-            { widget = nav_row,  weight = 0 },
-        },
-    }
+    local nav_bar = nav_row
 
     return {
         widget     = nav_bar,

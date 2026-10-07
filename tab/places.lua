@@ -79,8 +79,12 @@ function M.common_places()
             out[#out + 1] = c
         end
     end
-    -- Papelera al final si existe el directorio.
-    local trash = HOME .. "/.local/share/Trash"
+    -- Papelera al final si existe. Apuntamos a files/ (el
+    -- directorio donde viven los archivos borrados) en lugar de
+    -- la raíz Trash/ que solo contiene files/, info/ y expunged/.
+    -- Al navegar desde el sidebar el usuario debe ver los
+    -- archivos borrados directamente.
+    local trash = HOME .. "/.local/share/Trash/files"
     if is_dir(trash) then
         out[#out + 1] = {
             label = "Papelera",

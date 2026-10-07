@@ -50,6 +50,16 @@ function M.for_entry(opts)
 
     items[#items + 1] = { sep = true }
 
+    -- "Abrir con..." solo tiene sentido para archivos, no para
+    -- carpetas. En una carpeta la acción natural es navegar, no
+    -- elegir aplicación.
+    if not opts.is_dir then
+        items[#items + 1] = {
+            label = "Abrir con...",
+            on_click = opts.on_open_with,
+        }
+    end
+    items[#items + 1] = { sep = true }
     items[#items + 1] = {
         label = "Copiar ruta",
         on_click = opts.on_copy_path,
@@ -97,6 +107,11 @@ function M.for_background(opts)
     }
 
     items[#items + 1] = { sep = true }
+
+    items[#items + 1] = {
+        label = "Abrir terminal aquí",
+        on_click = opts.on_terminal,
+    }
 
     items[#items + 1] = {
         label = "Refrescar",

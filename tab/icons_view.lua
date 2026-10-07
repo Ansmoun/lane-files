@@ -5,17 +5,19 @@
 --
 -- El tamaño de los iconos es dinámico. Se ajusta con
 -- set_icon_size (Ctrl+rueda desde el consumidor).
+--
+-- Para imágenes se dibuja la miniatura real (PNG pre-escalado a
+-- 128px generado con lib.thumbs) en lugar del icono del tema.
 
-local Area       = require("lib.area")
-local cairo      = require("lib.cairo")
-local pango      = require("lib.pango")
-local G          = require("lib.helpers.graphics")
-local icon_theme = require("lib.icon_theme")
-local icons      = require("tab.icons")
+local Area  = require("lib.area")
+local cairo = require("lib.cairo")
+local pango = require("lib.pango")
+local G     = require("lib.helpers.graphics")
+local icons = require("tab.icons")
+local image_preview = require("tab.image_preview")
 
 local M = {}
 
--- Tamaños por defecto.
 local DEFAULT_SZ = 52
 local SZ_MIN     = 32
 local SZ_MAX     = 128
@@ -36,10 +38,13 @@ function IconsView.new(theme, state)
     self.hover_idx  = -1
     self.change_cbs = {}
 
-    -- Tamaño del icono y de la celda. Se actualizan en bloque con
-    -- set_icon_size.
     self.icon_size = DEFAULT_SZ
     self:_update_cell_dims()
+
+    -- Cache de surfaces de miniaturas: path -> surface | false.
+    self._thumb_cache = {}
+    -- Cache de labels truncados. Clave: path .. ":" .. avail.
+    self._label_cache = {}
 
     self.on_click       = nil
     self.on_right_click = nil
@@ -52,14 +57,9 @@ function IconsView.new(theme, state)
 end
 
 -- Recalcula el ancho y alto de la celda a partir del tamaño del
--- icono. La celda es 1.85x el icono de ancho, 2x de alto, para
--- dejar espacio al nombre debajo.
+-- icono.
 function IconsView:_update_cell_dims()
     local sz = self.icon_size
-    -- La celda es 1.6x el icono de ancho y 1.85x de alto. Más
-    -- compacto que antes. El gap y el padding del icono también
-    -- escalan con el tamaño para que la densidad sea uniforme a
-    -- cualquier zoom.
     self.cell_w  = math.floor(sz * 1.6)
     self.cell_h  = math.floor(sz * 1.85)
     self.gap     = math.max(4, math.floor(sz * 0.12))
@@ -68,18 +68,14 @@ function IconsView:_update_cell_dims()
     if self.cell_h < 56 then self.cell_h = 56 end
 end
 
--- Cambia el tamaño del icono. Recalcula la grilla y fuerza un
--- relayout. Devuelve true si el tamaño cambió.
--- Callback opcional. El consumidor lo usa para persistir el
--- tamaño entre sesiones.
-IconsView.on_icon_size_change = nil
-
 function IconsView:set_icon_size(sz)
     if sz < SZ_MIN then sz = SZ_MIN end
     if sz > SZ_MAX then sz = SZ_MAX end
     if sz == self.icon_size then return false end
     self.icon_size = sz
     self:_update_cell_dims()
+    -- El ancho de celda cambió: invalidar labels cacheados.
+    self._label_cache = {}
     self:_recalc()
     self:damage()
     if self.on_icon_size_change then
@@ -91,6 +87,8 @@ end
 function IconsView:get_icon_size()
     return self.icon_size
 end
+
+IconsView.on_icon_size_change = nil
 
 -- ── API tipo ScrollView ──────────────────────────────────────
 function IconsView:on_change(fn)
@@ -118,8 +116,28 @@ function IconsView:get_offset_max() return self.offset_max end
 function IconsView:get_count()      return #self.items end
 
 function IconsView:set_items(items)
-    self.items = items or {}
+    items = items or {}
+    -- Detectar cambio de directorio comparando el padre del primer
+    -- item. Si cambia, limpiar el cache de thumbs (los del
+    -- directorio viejo ya no son útiles en memoria).
+    local same_dir = true
+    if #items == 0 or #self.items == 0 then
+        same_dir = (#items == #self.items)
+    else
+        local a = items[1].path:match("^(.+)/[^/]+$")
+        local b = self.items[1] and
+            self.items[1].path:match("^(.+)/[^/]+$")
+        if a ~= b then same_dir = false end
+    end
+
+    self.items = items
     self.hover_idx = -1
+
+    if not same_dir then
+        self._thumb_cache = {}
+        self._label_cache = {}
+    end
+
     self:_recalc()
     self:damage()
 end
@@ -146,6 +164,36 @@ end
 
 function IconsView:set_window(win)
     self.window = win
+    -- Arrancar el timer de poll una sola vez. Comprueba cada 300ms
+    -- si algún thumbnail pasó de "no listo" a "listo" y daña solo
+    -- esas celdas.
+    if win and win.server and not self._poll_timer then
+        self._poll_timer = win.server:add_timer(300, function()
+            self:_poll_thumbs()
+        end)
+    end
+end
+
+-- Recorre los items visibles. Para los que son imágenes y no
+-- tienen surface todavía, comprueba si el thumb terminó. Si sí,
+-- carga y daña la celda.
+function IconsView:_poll_thumbs()
+    if not self.window or self.window.destroyed then return end
+    for i, item in ipairs(self.items) do
+        if item.path and not item.is_dir
+           and image_preview.is_image(item.path)
+           and not self._thumb_cache[item.path] then
+            -- Solo intentar si el item es visible.
+            local x, y = self:_cell_rect(i)
+            if y + self.cell_h >= self.y0 and y <= self.y1 then
+                local surf = image_preview.load(item.path)
+                if surf then
+                    self._thumb_cache[item.path] = surf
+                    self:_damage_cell(i)
+                end
+            end
+        end
+    end
 end
 
 -- ── Cálculo de posiciones ────────────────────────────────────
@@ -155,59 +203,6 @@ function IconsView:_cell_rect(i)
     local x = self.x0 + col * (self.cell_w + self.gap)
     local y = self.y0 + row * (self.cell_h + self.gap) - self.offset
     return x, y
-end
-
--- Mueve la selección por la grilla. direction es "up", "down",
--- "left" o "right". Devuelve true si la selección cambió.
-function IconsView:move_selection(direction)
-    local n = #self.items
-    if n == 0 then return false end
-    local cols = self.cols
-    if cols < 1 then cols = 1 end
-
-    local idx = self.state.selected_idx
-    if idx < 1 then idx = 1 end
-    if idx > n then idx = n end
-
-    local new_idx
-    if direction == "up" then
-        new_idx = idx - cols
-        if new_idx < 1 then new_idx = idx end
-    elseif direction == "down" then
-        new_idx = idx + cols
-        if new_idx > n then new_idx = idx end
-    elseif direction == "left" then
-        new_idx = idx - 1
-        if new_idx < 1 then new_idx = idx end
-    elseif direction == "right" then
-        new_idx = idx + 1
-        if new_idx > n then new_idx = idx end
-    else
-        return false
-    end
-
-    if new_idx == idx then return false end
-
-    self.state.selected_idx = new_idx
-    self.state.anchor_idx = new_idx
-    if self.state:selection_count() <= 1 then
-        self.state.selected_set = {}
-        local e = self.items[new_idx]
-        if e then self.state.selected_set[e.path] = true end
-    end
-
-    -- Scroll vertical si la fila queda fuera de la vista
-    local row = math.floor((new_idx - 1) / cols)
-    local cell_y = row * (self.cell_h + self.gap)
-    local view_h = self:getHeight()
-    if cell_y < self.offset then
-        self:set_offset(cell_y)
-    elseif cell_y + self.cell_h > self.offset + view_h then
-        self:set_offset(cell_y + self.cell_h - view_h)
-    end
-
-    self:damage()
-    return true
 end
 
 function IconsView:_idx_at(mx, my)
@@ -222,6 +217,83 @@ function IconsView:_idx_at(mx, my)
     local i = row * self.cols + col + 1
     if i < 1 or i > #self.items then return -1 end
     return i
+end
+
+-- Daña solo la celda del índice dado. Sin esto, mover el mouse
+-- redibuja el widget completo.
+function IconsView:_damage_cell(idx)
+    if not self.window or idx < 1 then return end
+    local col = (idx - 1) % self.cols
+    local row = math.floor((idx - 1) / self.cols)
+    local x0 = self.x0 + col * (self.cell_w + self.gap)
+    local y0 = self.y0 + row * (self.cell_h + self.gap) - self.offset
+    local x1 = x0 + self.cell_w
+    local y1 = y0 + self.cell_h
+    if y1 < self.y0 or y0 > self.y1 then return end
+    if x1 < self.x0 or x0 > self.x1 then return end
+    self.window:add_damage(x0, y0, x1, y1)
+end
+
+-- ── Cache de miniaturas ─────────────────────────────────────
+-- Devuelve la surface del thumbnail si ya está lista. Si no,
+-- solicita su generación en background y devuelve nil. La próxima
+-- pasada del timer de poll la cargará.
+function IconsView:_thumb_for(item)
+    if not item or not item.path then return nil end
+    if item.is_dir then return nil end
+
+    local cached = self._thumb_cache[item.path]
+    if cached ~= nil then
+        return cached or nil
+    end
+    if not image_preview.is_image(item.path) then
+        self._thumb_cache[item.path] = false
+        return nil
+    end
+    -- Intentar cargar. Si el thumb existe, devuelve la surface.
+    local surf = image_preview.load(item.path)
+    if surf then
+        self._thumb_cache[item.path] = surf
+        return surf
+    end
+    -- No está listo. Pedir generación en background. El poll
+    -- timer lo cargará cuando termine.
+    image_preview.request(item.path)
+    return nil
+end
+
+function IconsView:clear_thumb_cache()
+    self._thumb_cache = {}
+end
+
+-- Devuelve el label truncado al ancho disponible. Cachea el
+-- resultado por (item, ancho). pango.measure crea un PangoLayout
+-- cada vez; llamarlo en el draw por cada item es carísimo.
+function IconsView:_display_label(item, avail)
+    local key = item.path .. ":" .. avail
+    local cached = self._label_cache[key]
+    if cached then
+        return cached.label, cached.w, cached.h
+    end
+
+    local label = item.name
+    local font = "DejaVu Sans 9"
+    local tw = select(1, pango.measure(label, font))
+    if tw > avail then
+        local guard = 0
+        while #label > 1 and guard < 60 do
+            guard = guard + 1
+            label = label:sub(1, #label - 1)
+            tw = select(1, pango.measure(label .. "…", font))
+            if tw <= avail then
+                label = label .. "…"
+                break
+            end
+        end
+    end
+    local _, th = pango.measure(label, font)
+    self._label_cache[key] = { label = label, w = tw, h = th }
+    return label, tw, th
 end
 
 -- ── Draw ─────────────────────────────────────────────────────
@@ -267,34 +339,33 @@ function IconsView:draw(cr)
             cairo.fill(cr)
         end
 
-        local s = icons.icon_for(item, self.icon_size)
         local icon_y = y + self.pad_top
-        if s then
-            cairo.draw_surface(cr, s,
-                x + (self.cell_w - self.icon_size) / 2, icon_y,
-                self.icon_size, self.icon_size)
-        end
-
-        local label = item.name
-        local avail = self.cell_w - 8
-        local font = "DejaVu Sans 9"
-        local tw = select(1, pango.measure(label, font))
-        if tw > avail then
-            local guard = 0
-            while #label > 1 and guard < 60 do
-                guard = guard + 1
-                label = label:sub(1, #label - 1)
-                tw = select(1, pango.measure(label .. "…", font))
-                if tw <= avail then
-                    label = label .. "…"
-                    break
-                end
+        local thumb = self:_thumb_for(item)
+        if thumb then
+            local nw = cairo.surface_width(thumb)
+            local nh = cairo.surface_height(thumb)
+            if nw > 0 and nh > 0 then
+                local scale = math.min(self.icon_size / nw,
+                                       self.icon_size / nh)
+                local dw = nw * scale
+                local dh = nh * scale
+                local ix = x + (self.cell_w - dw) / 2
+                local iy = icon_y + (self.icon_size - dh) / 2
+                -- Filtro FAST: el thumb ya está pre-escalado a 128.
+                cairo.draw_surface_fast(cr, thumb, ix, iy, dw, dh)
+            end
+        else
+            local s = icons.icon_for(item, self.icon_size)
+            if s then
+                cairo.draw_surface(cr, s,
+                    x + (self.cell_w - self.icon_size) / 2, icon_y,
+                    self.icon_size, self.icon_size)
             end
         end
-        -- El nombre va justo debajo del icono, no al fondo de la
-        -- celda. Esto evita el hueco visible cuando el icono es
-        -- chico y la celda es más alta que el conjunto icono+label.
-        local _, lh = pango.measure(label, font)
+
+        local avail = self.cell_w - 8
+        local font = "DejaVu Sans 9"
+        local label, tw, lh = self:_display_label(item, avail)
         local label_y = icon_y + self.icon_size + 4
         pango.draw_text(cr, x + (self.cell_w - tw) / 2,
             label_y, label, font,
@@ -310,16 +381,19 @@ end
 function IconsView:on_mouse_move(mx, my)
     local idx = self:_idx_at(mx, my)
     if idx ~= self.hover_idx then
+        local old = self.hover_idx
         self.hover_idx = idx
-        self:damage()
+        self:_damage_cell(old)
+        self:_damage_cell(idx)
     end
 end
 
 function IconsView:set_hover(v)
     Area.set_hover(self, v)
     if not v and self.hover_idx ~= -1 then
+        local old = self.hover_idx
         self.hover_idx = -1
-        self:damage()
+        self:_damage_cell(old)
     end
 end
 
@@ -344,32 +418,72 @@ function IconsView:on_mouse_press(mx, my, button)
     end
 end
 
--- Zoom: pasos de 8px por click de rueda. Con Ctrl pulsado, la
--- rueda cambia el tamaño del icono en lugar de hacer scroll.
-local ZOOM_STEP = 8
-
 function IconsView:on_wheel(direction)
-    -- Detectar Ctrl con el keymap. El evento de rueda no trae el
-    -- estado de modificadores.
     local ctrl = false
     if self.srv and self.srv.conn then
         local xcb = require("lib.xcb")
         local km = xcb.query_keymap(self.srv.conn)
         if km then
-            ctrl = xcb.key_pressed(km, 37)  -- Control_L
+            ctrl = xcb.key_pressed(km, 37)
         end
     end
-
     if ctrl then
-        -- Cambio de tamaño. Arriba (4) agranda, abajo (5) achica.
-        local delta = (direction == 4) and ZOOM_STEP or -ZOOM_STEP
+        local delta = (direction == 4) and 8 or -8
         self:set_icon_size(self.icon_size + delta)
         return
     end
-
-    -- Sin Ctrl: scroll normal.
     local delta = (direction == 4) and -60 or 60
     self:set_offset(self.offset + delta)
+end
+
+function IconsView:move_selection(direction)
+    local n = #self.items
+    if n == 0 then return false end
+    local cols = self.cols
+    if cols < 1 then cols = 1 end
+
+    local idx = self.state.selected_idx
+    if idx < 1 then idx = 1 end
+    if idx > n then idx = n end
+
+    local new_idx
+    if direction == "up" then
+        new_idx = idx - cols
+        if new_idx < 1 then new_idx = idx end
+    elseif direction == "down" then
+        new_idx = idx + cols
+        if new_idx > n then new_idx = idx end
+    elseif direction == "left" then
+        new_idx = idx - 1
+        if new_idx < 1 then new_idx = idx end
+    elseif direction == "right" then
+        new_idx = idx + 1
+        if new_idx > n then new_idx = idx end
+    else
+        return false
+    end
+
+    if new_idx == idx then return false end
+
+    self.state.selected_idx = new_idx
+    self.state.anchor_idx = new_idx
+    if self.state:selection_count() <= 1 then
+        self.state.selected_set = {}
+        local e = self.items[new_idx]
+        if e then self.state.selected_set[e.path] = true end
+    end
+
+    local row = math.floor((new_idx - 1) / cols)
+    local cell_y = row * (self.cell_h + self.gap)
+    local view_h = self:getHeight()
+    if cell_y < self.offset then
+        self:set_offset(cell_y)
+    elseif cell_y + self.cell_h > self.offset + view_h then
+        self:set_offset(cell_y + self.cell_h - view_h)
+    end
+
+    self:damage()
+    return true
 end
 
 M.new = function(theme, state)

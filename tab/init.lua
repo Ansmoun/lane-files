@@ -157,6 +157,9 @@ function M.new(srv, theme, opts)
     if type(saved_size) ~= "number" then saved_size = nil end
 
     local initial_path = opts.initial_path or os.getenv("HOME")
+    local pick_mode    = opts.pick_mode       -- nil | "file" | "dir"
+    local on_pick      = opts.on_pick         -- function(paths)
+    local on_cancel    = opts.on_cancel       -- function()
 
     local tabs = new_tabs({
         view_mode = saved_view,
@@ -351,6 +354,50 @@ function M.new(srv, theme, opts)
         on_close  = close_tab,
         on_new    = new_tab,
     })
+
+    -- ── Modo selector ───────────────────────────────────────
+    -- En modo pick, el usuario puede aceptar la selección actual
+    -- con Enter, doble click o el botón Aceptar. La ruta se pasa
+    -- al callback on_pick del consumidor.
+    local function do_pick()
+        if not pick_mode then return end
+        local v = active()
+        if not v then return end
+        local paths = {}
+        -- En modo dir, si hay un directorio seleccionado, se
+        -- devuelve ese directorio. Si no, el cwd.
+        if pick_mode == "dir" then
+            local e = v.state:selected()
+            if e and e.is_dir then
+                paths[1] = e.path
+            else
+                paths[1] = v.state.cwd
+            end
+        else
+            -- Modo file: devolver todos los archivos seleccionados
+            -- que no sean directorios. Si el seleccionado es
+            -- directorio, navegar en lugar de aceptar.
+            local sel = v.state:selected_paths()
+            for _, p in ipairs(sel) do
+                local e = nil
+                for _, ent in ipairs(v.state.entries) do
+                    if ent.path == p then e = ent; break end
+                end
+                if e and not e.is_dir then
+                    paths[#paths + 1] = p
+                end
+            end
+            if #paths == 0 then
+                -- Ningún archivo elegible. No hacer nada.
+                return
+            end
+        end
+        if on_pick then on_pick(paths) end
+    end
+
+    local function do_cancel_pick()
+        if on_cancel then on_cancel() end
+    end
 
     -- ── Sidebar ─────────────────────────────────────────────
     sidebar_view = Sidebar.new(theme,
@@ -589,20 +636,78 @@ function M.new(srv, theme, opts)
         },
     }
 
-    local layout = W.Group.new {
-        orientation = "vertical",
-        spacing = 0,
-        padding = 0,
-        children = {
-            { widget = tab_menu_row,       weight = 0 },
-            { widget = Divider.new(theme), weight = 0 },
-            { widget = navbar_view.widget, weight = 0 },
-            { widget = Divider.new(theme), weight = 0 },
-            { widget = content_row,        weight = 1 },
-            { widget = Divider.new(theme), weight = 0 },
-            { widget = status_view.widget, weight = 0 },
-        },
-    }
+    -- En modo pick, construir un status bar alternativo con los
+    -- botones Aceptar/Cancelar a la derecha.
+    local pick_bar = nil
+    if pick_mode then
+        local btn_cancel = W.Button.new {
+            text = "Cancelar",
+            font = "DejaVu Sans 10",
+            padding_x = 16, padding_y = 4,
+            corner_radius = 4,
+            color_normal  = { 0.22, 0.22, 0.28 },
+            color_hover   = { 0.30, 0.30, 0.38 },
+            color_pressed = { 0.15, 0.15, 0.20 },
+            color_border  = { 0.42, 0.42, 0.52 },
+            color_text    = { 0.95, 0.95, 0.95 },
+            on_click = do_cancel_pick,
+        }
+        local btn_ok = W.Button.new {
+            text = "Aceptar",
+            font = "DejaVu Sans Bold 10",
+            padding_x = 16, padding_y = 4,
+            corner_radius = 4,
+            color_normal  = { 0.30, 0.55, 0.35 },
+            color_hover   = { 0.38, 0.65, 0.42 },
+            color_pressed = { 0.22, 0.42, 0.28 },
+            color_border  = { 0.45, 0.65, 0.50 },
+            color_text    = { 0.95, 0.95, 0.95 },
+            on_click = do_pick,
+        }
+        pick_bar = W.Group.new {
+            orientation = "horizontal",
+            spacing = 8,
+            padding = 6,
+            children = {
+                { widget = status_view.widget, weight = 1 },
+                { widget = btn_cancel, weight = 0 },
+                { widget = btn_ok,     weight = 0 },
+            },
+        }
+    end
+
+    local layout
+    if pick_mode then
+        -- Sin tab menu row, sin tabs bar. El navbar sigue con
+        -- breadcrumb y navegación.
+        layout = W.Group.new {
+            orientation = "vertical",
+            spacing = 0,
+            padding = 0,
+            children = {
+                { widget = navbar_view.widget, weight = 0 },
+                { widget = Divider.new(theme), weight = 0 },
+                { widget = content_row,        weight = 1 },
+                { widget = Divider.new(theme), weight = 0 },
+                { widget = pick_bar,           weight = 0 },
+            },
+        }
+    else
+        layout = W.Group.new {
+            orientation = "vertical",
+            spacing = 0,
+            padding = 0,
+            children = {
+                { widget = tab_menu_row,       weight = 0 },
+                { widget = Divider.new(theme), weight = 0 },
+                { widget = navbar_view.widget, weight = 0 },
+                { widget = Divider.new(theme), weight = 0 },
+                { widget = content_row,        weight = 1 },
+                { widget = Divider.new(theme), weight = 0 },
+                { widget = status_view.widget, weight = 0 },
+            },
+        }
+    end
 
     -- Interceptar set_window del layout raíz. Window:set_root
     -- llama a area:set_window(win) sobre el widget raíz (este
@@ -660,6 +765,20 @@ function M.new(srv, theme, opts)
     end
 
     local function on_key(key)
+        -- Modo selector: interceptar Enter y Escape antes que el
+        -- resto de la cadena.
+        if pick_mode and key.pressed and not key.mods.ctrl
+           and not key.mods.alt and not key.mods.super then
+            if key.name == "Return" or key.name == "KP_Enter" then
+                do_pick()
+                return true
+            end
+            if key.name == "Escape" then
+                do_cancel_pick()
+                return true
+            end
+        end
+
         -- Atajos globales del contenedor (no de la tab).
         if key.pressed and key.mods.ctrl then
             if key.name == "t" and not key.mods.shift then

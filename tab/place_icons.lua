@@ -221,6 +221,60 @@ local function draw_bookmark(cr, x, y, s, r, g, b)
     cairo.stroke(cr)
 end
 
+-- Disco duro interno: rectangulo horizontal con un circulo a la
+-- derecha (estilo HDD de bandeja).
+local function draw_harddisk(cr, x, y, s, r, g, b)
+    setup(cr, r, g, b)
+    cairo.rectangle(cr,
+        x + s * 0.12, y + s * 0.28,
+        s * 0.76, s * 0.44)
+    cairo.new_sub_path(cr)
+    cairo.arc(cr,
+        x + s * 0.76, y + s * 0.50,
+        s * 0.05, 0, 2 * math.pi)
+    stroke_style(cr, s)
+    cairo.stroke(cr)
+end
+
+-- Disco extraible (USB): misma forma pero con un "conector" abajo
+-- y una ranura, para diferenciarlo del interno.
+local function draw_removable(cr, x, y, s, r, g, b)
+    setup(cr, r, g, b)
+    cairo.rectangle(cr,
+        x + s * 0.14, y + s * 0.28,
+        s * 0.72, s * 0.44)
+    -- Lengueta de conexion abajo
+    cairo.move_to(cr, x + s * 0.42, y + s * 0.72)
+    cairo.line_to(cr, x + s * 0.42, y + s * 0.86)
+    cairo.line_to(cr, x + s * 0.58, y + s * 0.86)
+    cairo.line_to(cr, x + s * 0.58, y + s * 0.72)
+    -- Led indicador
+    cairo.new_sub_path(cr)
+    cairo.arc(cr,
+        x + s * 0.76, y + s * 0.50,
+        s * 0.05, 0, 2 * math.pi)
+    stroke_style(cr, s)
+    cairo.stroke(cr)
+end
+
+-- Telefono (MTP). Silueta de smartphone con pantalla.
+local function draw_phone(cr, x, y, s, r, g, b)
+    setup(cr, r, g, b)
+    cairo.rectangle(cr,
+        x + s * 0.30, y + s * 0.12,
+        s * 0.40, s * 0.76)
+    -- Boton home
+    cairo.new_sub_path(cr)
+    cairo.arc(cr,
+        x + s * 0.50, y + s * 0.82,
+        s * 0.03, 0, 2 * math.pi)
+    -- Auricular
+    cairo.move_to(cr, x + s * 0.42, y + s * 0.18)
+    cairo.line_to(cr, x + s * 0.58, y + s * 0.18)
+    stroke_style(cr, s)
+    cairo.stroke(cr)
+end
+
 -- ── Dispatch ───────────────────────────────────────────────
 local DISPATCH = {
     ["home"]               = draw_home,
@@ -235,6 +289,9 @@ local DISPATCH = {
     ["user-trash"]         = draw_trash,
     ["folder"]             = draw_folder,
     ["bookmark"]           = draw_bookmark,
+    ["drive-harddisk"]     = draw_harddisk,
+    ["drive-removable"]    = draw_removable,
+    ["phone"]              = draw_phone,
 }
 
 function M.draw(cr, x, y, size, name, r, g, b)

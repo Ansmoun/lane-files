@@ -8,6 +8,7 @@ local pango       = require("lib.pango")
 local G           = require("lib.helpers.graphics")
 local places      = require("tab.places")
 local place_icons = require("tab.place_icons")
+local devices     = require("tab.devices")
 
 local M = {}
 
@@ -143,6 +144,7 @@ function Sidebar:rebuild()
     self.items = {}
 
     for _, entry in ipairs(places.common_places()) do
+        entry.is_bookmark = false
         self.items[#self.items + 1] = {
             section = "Lugares",
             entry   = entry,
@@ -151,10 +153,21 @@ function Sidebar:rebuild()
 
     for _, entry in ipairs(places.bookmarks()) do
         -- Marcadores con icono distintivo (cinta) en lugar de
-        -- carpeta genérica.
+        -- carpeta genérica. El flag is_bookmark lo usa el menu
+        -- contextual para ofrecer "Quitar de marcadores".
         entry.icon = "bookmark"
+        entry.is_bookmark = true
         self.items[#self.items + 1] = {
             section = "Marcadores",
+            entry   = entry,
+        }
+    end
+
+    for _, entry in ipairs(devices.list()) do
+        entry.is_bookmark = false
+        entry.is_device = true
+        self.items[#self.items + 1] = {
+            section = "Dispositivos",
             entry   = entry,
         }
     end

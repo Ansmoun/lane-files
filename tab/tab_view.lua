@@ -814,6 +814,14 @@ function TabView.new(srv, theme, opts)
     self.set_view         = set_view
     self.update_selection_info = update_selection_info
 
+    -- Destruye la tab: cancela timers y libera caches. Llamar
+    -- antes de remover la tab del stack.
+    self.destroy = function()
+        if icons_view and icons_view.destroy then
+            icons_view:destroy()
+        end
+    end
+
     -- Start inicial
     self.state.history = { self.state.cwd }
     self.state.history_idx = 1

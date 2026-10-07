@@ -35,8 +35,18 @@ function TabButton.new(theme, id, name, on_select, on_close)
     return self
 end
 
+local MAX_NAME_CHARS = 22
+
 function TabButton:_recalc_width()
-    local tw = select(1, pango.measure(self.name or "", "DejaVu Sans 10"))
+    local name = self.name or ""
+    -- Truncar nombres largos con ellipsis. Sin esto, una tab con
+    -- nombre largo desplaza al resto y empuja el boton "+" fuera
+    -- de la pantalla.
+    if #name > MAX_NAME_CHARS then
+        name = name:sub(1, MAX_NAME_CHARS - 1) .. "\u{2026}"
+    end
+    self._display_name = name
+    local tw = select(1, pango.measure(name, "DejaVu Sans 10"))
     self.tw = tw
     local w = PAD_X + tw + 8 + CLOSE_SIZE + PAD_X
     self.min_w, self.max_w = w, w
@@ -100,9 +110,10 @@ function TabButton:draw(cr)
     else
         fg = T.muted_rgb or { 0.5, 0.5, 0.5 }
     end
-    local _, lh = pango.measure(self.name or "", "DejaVu Sans 10")
+    local dn = self._display_name or self.name or ""
+    local _, lh = pango.measure(dn, "DejaVu Sans 10")
     pango.draw_text(cr, x + PAD_X, y + (h - lh) / 2,
-        self.name or "", "DejaVu Sans 10",
+        dn, "DejaVu Sans 10",
         { r = fg[1], g = fg[2], b = fg[3] })
 
     -- Botón ×

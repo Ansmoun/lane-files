@@ -290,6 +290,26 @@ function IconsView:clear_thumb_cache()
     self._thumb_cache = {}
 end
 
+-- Libera recursos al cerrar la tab: cancela el timer de poll,
+-- destruye las surfaces cairo de la cache (memoria nativa, no
+-- liberable por GC), y suelta los items.
+function IconsView:destroy()
+    if self._poll_timer then
+        self._poll_timer:cancel()
+        self._poll_timer = nil
+    end
+    local cairo = require("lib.cairo")
+    for _, surf in pairs(self._thumb_cache) do
+        if surf and surf ~= false then
+            cairo.destroy_surface(surf)
+        end
+    end
+    self._thumb_cache = {}
+    self._label_cache = {}
+    self.items = {}
+    self.window = nil
+end
+
 -- Devuelve el label truncado al ancho disponible. Cachea el
 -- resultado por (item, ancho). pango.measure crea un PangoLayout
 -- cada vez; llamarlo en el draw por cada item es carísimo.

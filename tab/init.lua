@@ -264,6 +264,9 @@ function M.new(srv, theme, opts)
         if _window then _window:damage_all() end
     end
 
+    -- Pila de tabs cerradas, para Ctrl+Shift+T.
+    local closed_stack = {}
+
     -- ── Barra de pestañas ───────────────────────────────────
     local function sync_tabs_bar()
         local list = {}
@@ -300,6 +303,23 @@ function M.new(srv, theme, opts)
             -- Última pestaña: cerrar la ventana.
             if _window then _window:close("última pestaña cerrada") end
             return
+        end
+        -- Cancelar timers y liberar surfaces antes de remover del
+        -- arbol. Sin esto el _poll_timer de icons_view sigue
+        -- disparando cada 100 ms sobre una tab ya cerrada.
+        local entry = tabs:get(id)
+        if entry and entry.view.destroy then
+            entry.view:destroy()
+        end
+        -- Guardar el cwd para Ctrl+Shift+T.
+        if entry then
+            closed_stack[#closed_stack + 1] = {
+                path = entry.view.state.cwd,
+            }
+            -- Cap de 20 para no crecer sin limite.
+            if #closed_stack > 20 then
+                table.remove(closed_stack, 1)
+            end
         end
         tabs:remove(id)
         view_stack:remove(id)
@@ -781,6 +801,14 @@ function M.new(srv, theme, opts)
 
         -- Atajos globales del contenedor (no de la tab).
         if key.pressed and key.mods.ctrl then
+            if key.name == "t" and key.mods.shift then
+                -- Ctrl+Shift+T: reabrir ultima cerrada.
+                if #closed_stack > 0 then
+                    local last = table.remove(closed_stack)
+                    new_tab(last.path)
+                end
+                return true
+            end
             if key.name == "t" and not key.mods.shift then
                 new_tab()
                 return true
@@ -813,7 +841,11 @@ function M.new(srv, theme, opts)
         widget    = layout,
         set_window = set_window,
         start     = start,
-        stop      = function() end,
+        stop      = function()
+            for _, e in ipairs(tabs.list) do
+                if e.view.destroy then e.view:destroy() end
+            end
+        end,
         on_key    = on_key,
     }
 end

@@ -471,6 +471,20 @@ function M.new(srv, theme, opts)
                 { label = "Abrir en nueva pestaña",
                   on_click = function() new_tab(entry.path) end },
             }
+            if entry.is_bookmark then
+                items[#items + 1] = { sep = true }
+                items[#items + 1] = {
+                    label = "Quitar de marcadores",
+                    color = { 0.9, 0.4, 0.4 },
+                    on_click = function()
+                        local bm = require("tab.bookmarks")
+                        bm.remove(entry.path)
+                        sidebar_view:refresh()
+                        log.info("files",
+                            "marcador quitado: %s", entry.path)
+                    end,
+                }
+            end
             if entry.icon == "user-trash" then
                 items[#items + 1] = { sep = true }
                 items[#items + 1] = {

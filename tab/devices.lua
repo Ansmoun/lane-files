@@ -25,17 +25,21 @@ local function unescape(s)
     end))
 end
 
--- Filesystems que no nos interesan (virtuales, internos del kernel).
+-- Filesystems que no nos interesan. SOLO los verdaderamente
+-- virtuales del kernel. Un mount de red (sshfs, nfs) o un fuse de
+-- usuario bajo /media o /mnt SI debe aparecer — el filtro real lo
+-- hace is_user_mount(). Excluir sshfs aca impedia ver el celular
+-- montado por red en /media/$USER/xxx.
 local VIRTUAL_FS = {
     proc = true, sysfs = true, devtmpfs = true, devpts = true,
     tmpfs = true, cgroup = true, cgroup2 = true, securityfs = true,
     debugfs = true, tracefs = true, configfs = true, fusectl = true,
     pstore = true, bpf = true, mqueue = true, hugetlbfs = true,
     rpc_pipefs = true, autofs = true, nsfs = true, ramfs = true,
-    squashfs = true, overlay = true, efivarfs = true, binfmt_misc = true,
-    -- FUSE que no queremos (sshfs, gvfs de cosas raras) - salvo
-    -- gvfs de mtp, que se maneja aparte.
-    ["fuse.sshfs"] = true, ["fuse.gvfsd-fuse"] = true,
+    efivarfs = true, binfmt_misc = true,
+    -- El gvfs daemon de sesion no es un dispositivo. Los MTP reales
+    -- viven bajo /run/user/$UID/gvfs/ y se detectan por is_user_mount.
+    ["fuse.gvfsd-fuse"] = true,
 }
 
 -- Punto de montaje que representa un "dispositivo de usuario".

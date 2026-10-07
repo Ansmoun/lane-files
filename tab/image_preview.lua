@@ -1,31 +1,42 @@
--- image_preview: thumbnails asíncronos.
+-- image_preview: shim sobre LaneTK/lib.thumbs para lane-files.
 --
--- Muy simple:
---   - exists(path)   -> bool, el PNG ya está en disco.
---   - request(path)  -> lanza ffmpeg en background (no bloquea).
---   - load(path)     -> devuelve surface si el PNG existe, nil
---                       si todavía no.
+-- La logica de decodificacion y cache vive en LaneTK (estandar
+-- freedesktop, ~/.cache/thumbnails/<bucket>/<md5(uri)>.png).
+-- Este modulo solo adapta la API vieja (request/load) a la nueva
+-- y expone is_image/thumb_path para compatibilidad con los
+-- consumidores actuales (icons_view, preview_panel).
 --
--- El consumidor llama request() cuando un item se hace visible y
--- load() en cada draw. Cuando load() devuelve la surface, el
--- thumb está listo.
+-- Contrato:
+--   is_image(path)    extension esta en la lista de imagenes
+--   thumb_path(path)  path canonico en el cache (sin tocar nada)
+--   exists(path)      el PNG cacheado existe y es archivo regular
+--   request(path)     genera si hace falta (SINCRONO, 40-70 ms,
+--                     usar con moderacion desde un timer)
+--   load(path)        si el cache existe, surface; nil si no.
+--                     NO genera (para no bloquear el draw)
+--   clear_cache()     libera surfaces en memoria (disco intacto)
+--   has_pending()     siempre false (no hay jobs en vuelo)
+--   pending_paths()   siempre {}
 
-local cairo       = require("lib.cairo")
-local log         = require("lib.log")
+local cairo  = require("lib.cairo")
+local fs     = require("lib.fs")
+local gp     = require("lib.gdk_pixbuf")
+local thumbs = require("lib.thumbs")
+local log    = require("lib.log")
 
 local M = {}
 
-local THUMB_SIZE = 128
-local CACHE_DIR = (os.getenv("HOME") or "/tmp") ..
-    "/.cache/lane/thumbs"
-
-local _surface_cache = {}
-local _pending = {}  -- set de paths con ffmpeg en vuelo
+-- Bucket por defecto de lane-files. 128px es lo que usaba la
+-- version anterior con ffmpeg.
+local BUCKET = "normal"
 
 local IMAGE_EXTS = {
     png = true, jpg = true, jpeg = true, gif = true,
     webp = true, bmp = true, tiff = true, ico = true,
+    svg = true, svgz = true,
 }
+
+local _surface_cache = {}
 
 local function ext_of(path)
     local e = path:match("%.([^.]+)$")
@@ -37,80 +48,43 @@ function M.is_image(path)
     return IMAGE_EXTS[ext_of(path)] == true
 end
 
-local function shq(s)
-    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
-end
-
-local function hash_path(path)
-    local h = 0x811c9dc5
-    for i = 1, #path do
-        h = h ~ path:byte(i)
-        h = (h * 0x01000193) % 0x100000000
-    end
-    return string.format("%08x", h)
-end
-
+-- Path canonico en el cache. Solo calcula el hash, no mira disco.
 function M.thumb_path(path)
-    return CACHE_DIR .. "/" .. hash_path(path) .. "_" ..
-        THUMB_SIZE .. ".png"
+    if not path then return nil end
+    return thumbs.cache_path(path, BUCKET)
 end
 
-local function file_exists(p)
-    local f = io.open(p, "r")
-    if f then f:close() return true end
-    return false
-end
-
--- ¿El thumbnail ya está en disco?
 function M.exists(path)
     if not path or not M.is_image(path) then return false end
-    return file_exists(M.thumb_path(path))
+    local p = thumbs.cache_path(path, BUCKET)
+    if not p then return false end
+    return fs.is_file(p)
 end
 
--- Lanza ffmpeg en background. No bloquea. Idempotente.
+-- Genera el thumbnail si hace falta. SINCRONO. Pensado para
+-- llamarse desde un timer que genera como maximo 1 por tick (ver
+-- icons_view:_poll_thumbs). Llamarlo desde el draw congela la UI.
 function M.request(path)
     if not path or not M.is_image(path) then return end
-    if M.exists(path) then return end
-    if _pending[path] then return end
-
-    os.execute("mkdir -p " .. shq(CACHE_DIR))
-    local dst = M.thumb_path(path)
-    local tmp = dst .. ".tmp.png"
-    local vf = string.format(
-        "scale=%d:%d:flags=fast_bilinear:" ..
-        "force_original_aspect_ratio=decrease",
-        THUMB_SIZE, THUMB_SIZE)
-    -- setsid -f: crea una nueva sesión y fork sin esperar. La
-    -- app no bloquea. ffmpeg escribe a tmp y renombra al terminar
-    -- (mv es atómico en el mismo directorio).
-    local cmd = string.format(
-        "setsid -f sh -c " ..
-        "%s" ..
-        " >/dev/null 2>&1",
-        shq(string.format(
-            "ffmpeg -nostdin -v error -i %s -vf %s -frames:v 1 -y %s " ..
-            "&& mv %s %s",
-            shq(path), shq(vf), shq(tmp), shq(tmp), shq(dst))))
-    os.execute(cmd)
-    _pending[path] = true
+    thumbs.ensure(path, BUCKET)
 end
 
--- Carga el thumbnail si ya está en disco. Devuelve nil si no.
+-- Cache hit only. Si el PNG existe, lo carga; si no, nil. NO
+-- genera. Este es el camino rapido que se llama desde el draw.
 function M.load(path)
     if not path or not M.is_image(path) then return nil end
     local cached = _surface_cache[path]
     if cached ~= nil then
         return cached or nil
     end
-    local dst = M.thumb_path(path)
-    if not file_exists(dst) then
-        -- Todavía no listo. Dejar el pending como estaba.
+    local cache_path = thumbs.cache_path(path, BUCKET)
+    if not cache_path or not fs.is_file(cache_path) then
         return nil
     end
-    -- Listo: cargar y limpiar el pending.
-    _pending[path] = nil
-    local surf = cairo.load_png_cached(dst)
+    local surf, err = gp.load(cache_path)
     if not surf then
+        log.warn("image_preview", "cache ilegible: %s (%s)",
+            cache_path, err or "?")
         _surface_cache[path] = false
         return nil
     end
@@ -118,20 +92,12 @@ function M.load(path)
     return surf
 end
 
--- ¿Hay algún job en vuelo? Para que el consumidor decida si
--- seguir polleando.
-function M.has_pending()
-    for _ in pairs(_pending) do return true end
-    return false
-end
+function M.has_pending()  return false end
+function M.pending_paths() return {} end
 
--- Lista de paths pendientes (para debug).
-function M.pending_paths()
-    local out = {}
-    for p in pairs(_pending) do out[#out + 1] = p end
-    return out
-end
-
+-- Libera las surfaces en memoria. El cache en disco queda.
+-- No destruimos los surfaces porque pueden estar referenciados
+-- por consumidores (icons_view los cachea por path).
 function M.clear_cache()
     _surface_cache = {}
 end

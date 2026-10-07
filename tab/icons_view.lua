@@ -168,7 +168,7 @@ function IconsView:set_window(win)
     -- si algún thumbnail pasó de "no listo" a "listo" y daña solo
     -- esas celdas.
     if win and win.server and not self._poll_timer then
-        self._poll_timer = win.server:add_timer(300, function()
+        self._poll_timer = win.server:add_timer(100, function()
             self:_poll_thumbs()
         end)
     end
@@ -179,17 +179,45 @@ end
 -- carga y daña la celda.
 function IconsView:_poll_thumbs()
     if not self.window or self.window.destroyed then return end
+
+    -- Presupuesto por tick. La decodificacion ronda los 5-90 ms
+    -- por imagen en este hardware; 30 ms deja el resto del tick
+    -- (100 ms) para eventos de X y draws. La UI se mantiene
+    -- responsiva aunque haya cientos de thumbs por generar.
+    local BUDGET_MS = 30
+    local start = os.clock()
+    local generated = 0
+
     for i, item in ipairs(self.items) do
+        -- Cortamos cuando ya generamos al menos 1 y se acabo el
+        -- presupuesto. "Al menos 1" garantiza progreso aunque una
+        -- sola imagen tarde mas que el presupuesto entero.
+        if generated > 0
+           and (os.clock() - start) * 1000 >= BUDGET_MS then
+            break
+        end
+
         if item.path and not item.is_dir
            and image_preview.is_image(item.path)
            and not self._thumb_cache[item.path] then
-            -- Solo intentar si el item es visible.
             local x, y = self:_cell_rect(i)
             if y + self.cell_h >= self.y0 and y <= self.y1 then
+                -- 1) Cache hit: casi gratis (lee metadata, sin
+                --    decodificar). Se hace antes de generar nada
+                --    para poblar rapido lo que ya este en disco.
                 local surf = image_preview.load(item.path)
                 if surf then
                     self._thumb_cache[item.path] = surf
                     self:_damage_cell(i)
+                else
+                    -- 2) Generar (caro). Despues reintentar load.
+                    image_preview.request(item.path)
+                    generated = generated + 1
+                    surf = image_preview.load(item.path)
+                    if surf then
+                        self._thumb_cache[item.path] = surf
+                        self:_damage_cell(i)
+                    end
                 end
             end
         end
@@ -235,9 +263,9 @@ function IconsView:_damage_cell(idx)
 end
 
 -- ── Cache de miniaturas ─────────────────────────────────────
--- Devuelve la surface del thumbnail si ya está lista. Si no,
--- solicita su generación en background y devuelve nil. La próxima
--- pasada del timer de poll la cargará.
+-- Devuelve la surface del thumb si ya esta en disco (cache hit).
+-- NO genera: bloquearia el draw. La generacion la maneja el poll
+-- timer, a razon de 1 thumbnail por tick.
 function IconsView:_thumb_for(item)
     if not item or not item.path then return nil end
     if item.is_dir then return nil end
@@ -250,15 +278,11 @@ function IconsView:_thumb_for(item)
         self._thumb_cache[item.path] = false
         return nil
     end
-    -- Intentar cargar. Si el thumb existe, devuelve la surface.
     local surf = image_preview.load(item.path)
     if surf then
         self._thumb_cache[item.path] = surf
         return surf
     end
-    -- No está listo. Pedir generación en background. El poll
-    -- timer lo cargará cuando termine.
-    image_preview.request(item.path)
     return nil
 end
 

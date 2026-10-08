@@ -405,22 +405,116 @@ function TabView.new(srv, theme, opts)
         local mode, paths = clipboard.get()
         if not mode or #paths == 0 then return end
         local dst = self.state.cwd
-        local result, errors
-        if mode == "copy" then
-            result, errors = ops.copy(paths, dst)
-        else
-            result, errors = ops.move(paths, dst)
-            clipboard.clear()
-        end
-        if #errors > 0 then
-            for _, e in ipairs(errors) do
-                log.warn("files", "pegar: %s", e)
+
+        -- Detectar colisiones: si algún basename ya existe en dst.
+        -- No usamos unique_dest acá, solo comprobamos existencia.
+        local collisions = 0
+        log.info("files", "paste: cwd=%s, %d origen(es)",
+            tostring(dst), #paths)
+        for _, src in ipairs(paths) do
+            local name = src:match("[^/]+$") or src
+            local candidate
+            if dst == "/" then candidate = "/" .. name
+            else candidate = dst .. "/" .. name end
+            local f = io.open(candidate, "r")
+            local exists = f and "SI" or "NO"
+            if f then
+                f:close()
+                collisions = collisions + 1
             end
+            log.info("files", "  check %s -> %s (%s)",
+                src, candidate, exists)
         end
-        if #result > 0 then
-            log.info("files", "pegado: %d elementos", #result)
+        log.info("files", "colisiones detectadas: %d", collisions)
+
+        local function proceed(overwrite)
+            if mode == "cut" then clipboard.clear() end
+
+            local ops_async = require("tab.ops_async")
+            local progress_dialog = require("tab.progress_dialog")
+
+            local handle, err = ops_async.start(mode, paths, dst, {
+                overwrite = overwrite,
+            })
+            if not handle then
+                log.warn("files", "pegar: %s", tostring(err))
+                refresh_keep_selection()
+                return
+            end
+
+            -- Timer único. Reglas:
+            --   - operación total < 1 MB -> NUNCA mostrar diálogo
+            --     (cp de 1 MB tarda pocos ms; el diálogo solo
+            --     molesta).
+            --   - operación grande: mostrar diálogo SOLO si tarda
+            --     más de 400 ms (evita el flash cuando termina
+            --     rápido pero el setup ya consumió tiempo).
+            local timer = require("lib.timer")
+            local small_op = (handle.total_bytes or 0) < 1024 * 1024
+            local shown = false
+            local start_t = timer.now_ms()
+
+            local poll_tm
+            poll_tm = srv:add_timer(60, function()
+                if handle:is_done() then
+                    poll_tm:cancel()
+                    -- Refrescar SIEMPRE, sin importar si el
+                    -- dialogo aparecio o no. Antes solo se
+                    -- refrescaba si !shown; si el dialogo
+                    -- aparecia, la unica via de refresh era
+                    -- on_done, que no siempre llegaba. Resultado:
+                    -- el archivo nuevo no se veia hasta navegar
+                    -- a otra carpeta y volver.
+                    local errors = handle:status().errors or {}
+                    for _, e in ipairs(errors) do
+                        log.warn("files", "pegar: %s", e)
+                    end
+                    refresh_keep_selection()
+                    -- Segundo refresh con delay: algunos FS
+                    -- tardan unos ms en reflejar el ultimo
+                    -- rename. Sin esto, una copia que termina
+                    -- exactamente en el boundary del readdir
+                    -- puede dejar el item afuera.
+                    if self.window then
+                        local w = self.window
+                        srv:add_timeout(150, function()
+                            if w and not w.destroyed then
+                                refresh_keep_selection()
+                            end
+                        end)
+                    end
+                    return
+                end
+                if shown then return end
+                if small_op then return end
+                local now = timer.now_ms()
+                if (now - start_t) < 400 then return end
+                shown = true
+                progress_dialog.show {
+                    parent_win = parent_win(),
+                    srv        = srv,
+                    theme      = theme,
+                    handle     = handle,
+                    mode       = mode,
+                    -- on_done / on_cancel ya no refrescan: el
+                    -- poll_tm es la unica fuente.
+                }
+            end)
         end
-        refresh_keep_selection()
+
+        if collisions > 0 then
+            require("tab.dialog_collision").show {
+                parent_win   = parent_win(),
+                srv          = srv,
+                theme        = theme,
+                count        = collisions,
+                on_overwrite = function() proceed(true)  end,
+                on_rename    = function() proceed(false) end,
+                on_cancel    = function() end,
+            }
+        else
+            proceed(false)
+        end
     end
 
     local function do_rename()
@@ -697,7 +791,23 @@ function TabView.new(srv, theme, opts)
         local wy = active_widget.y0 + my
         if item and type(item) == "table"
            and item.path and item.name then
-            self.state.selected_idx = idx or self.state.selected_idx
+            -- Regla de cualquier file manager: click derecho sobre
+            -- un item que NO esta en la seleccion actual resetea
+            -- el conjunto a solo ese item. Si ya estaba en el
+            -- conjunto, se respeta (permite copiar/mover varios
+            -- con una sola accion).
+            --
+            -- Antes solo se actualizaba selected_idx (el foco),
+            -- pero selected_set (el conjunto) quedaba con lo que
+            -- hubiera antes. Copiar desde el menu contextual
+            -- copiaba el conjunto viejo, no el item bajo el cursor.
+            local already_selected =
+                self.state.selected_set[item.path] == true
+            if not already_selected then
+                self.state:select_single(idx)
+            else
+                self.state.selected_idx = idx or self.state.selected_idx
+            end
             redraw()
             show_context_for_entry(item, wx, wy)
         else
